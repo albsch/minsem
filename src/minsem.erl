@@ -37,7 +37,7 @@
 -type flag() :: true.
 
 % ty_ref, ty_rec are implementation specific
--record(ty, {flag :: vardnf(dnf(flag())), product :: vardnf(dnf(product()))}).
+-record(ty, {flag :: dnf(flag()), product :: dnf(product())}).
 -type ty_ref () :: fun(() -> ty()).
 -type ty_rec () :: #ty{}.
 
@@ -49,14 +49,6 @@
 % An example DNF of products: [{[{true*, true*}], []}, {[], [{false*, true*}]}] == {true, true} | !{false, true}
 % Note that inside the products, true* and false* are actually ty_ref() again and unfold to a full ty_rec().
 -type dnf(Atom) :: [{[Atom], [Atom]}]. 
-
-% A variable DNF of X is similar to a DNF, as each coclause tracks positive and negative variables.
-% Further, each variable coclause includes a full normal DNF of type X.
--type vardnf(InnerDnf) :: [{[var()], [var()], InnerDnf}]. 
-
-% A variable is represented as a counter.
--record(v, {id :: integer()}).
--type var() :: #v{}.
 
 % Constructors for flags and products at the DNF level
 -spec flag() -> dnf(true).
@@ -74,33 +66,26 @@ product(P) -> [{[P], []}].
 -spec negated_product(product()) -> dnf(product()).
 negated_product(P) -> [{[], [P]}].
 
-% Constructors for variables and nested DNFs (called variable atoms) at the variable DNF level
--spec var_atom(InnerDnf) -> vardnf(InnerDnf).
-var_atom(X) -> [{[], [], X}].
-
--spec var(var()) -> vardnf(dnf(product()) | dnf(flag())).
-var(V) -> [{[V], [], []}].
-
--spec negated_var(var()) -> vardnf(dnf(product()) | dnf(flag())).
-negated_var(V) -> [{[], [V], []}].
-
 % We can now define the corecursive Top type:
 % Any = true U. {Any, Any}
 -spec any() -> ty().
-any() -> #ty{
-    % Notice that we introduce the equation name 'any/0' (the constant function reference) and 
+any() -> fun Any() -> #ty{
+    % Notice that we introduce the equation name 'Any' (the constant function reference) and 
     % use it in the right-hand side of the equation in the product constructor
-    % It is important to not introduce a new equation new name for the any type,
-    % as this would lead to the need alpha-renaming
-    flag = var_atom(flag()),
-    product = var_atom(product(fun any/0, fun any/0))
-  }.
+    % The return type of this function is strictly speaking a new equation
+    % Luckily, erlang hashes the (AST) same closures to the same hash value
+    % so it won't happen that a type equation is created when an "old" type equation already memoized is expected
+    % e.g. X = {true, true} & {true, true} -> should be hashed as X = {true, true}, and not a new X2 = {true, true} & {true, true} with X2 /= X
+    % Otherwise, we would need to implement hashing module alpha renaming ourselves
+    flag = flag(),
+    product = product(Any, Any)
+  } end.
 
 % To define the empty type, 
 % we need to define the corecursive operator: negation.
 % !Any = false U. !{Any, Any}
 -spec empty() -> ty().
-empty() -> neg(fun any/0).
+empty() -> neg(any()).
 
 % A corecursive function consists of both a regular definition
 % and its codefinition.
@@ -133,6 +118,7 @@ neg(Ty, Memo) when is_function(Ty) ->
       % 'unfold' the type, memoize, and negate.
       % This new reference NewTy is a neq corecursive equation.
       % Every function in general that handles a ty() is corecursive.
+      % Will this new reference always result in a new equation? No. (see comment on the any() function)
       fun NewTy() -> neg(Ty(), Memo#{Ty => NewTy}) end
   end;
 % negation delegates the operation onto its components
@@ -140,20 +126,10 @@ neg(Ty, Memo) when is_function(Ty) ->
 % we use a generic vdnf traversal and specific dnf traverals for flags and products
 % the variable negation function is supplied with a function which knows how to negate its components
 neg(#ty{flag = F, product = Prod}, M) -> 
-  FlagDnf = negate_vdnf(F, fun(Flag, Memo) -> var_atom(negate_flag_dnf(Flag, Memo)) end, M), 
-  ProductDnf = negate_vdnf(Prod, fun(P, Memo) -> var_atom(negate_product_dnf(P, Memo)) end, M),
+  FlagDnf = negate_flag_dnf(F, M),
+  ProductDnf = negate_product_dnf(Prod, M),
   #ty{flag = FlagDnf, product = ProductDnf}.
 
-% the negation on the variable DNF level and atom DNF level
--spec negate_vdnf(vardnf(X), fun((X, memo()) -> X), memo()) -> vardnf(X).
-negate_vdnf(VDnf, NegateVarAtom, Memo) ->
-  % for each coclause (Pvars, Nvars, Leaf), we flip the variable signs and negate the atom
-  % for two flipped coclauses, we intersect them
-  vdnf(VDnf, {fun(PV, NV, T) -> 
-      [X | Xs] = [negated_var(V) || V <- PV] ++ [var(V) || V <- NV] ++ [NegateVarAtom(T, Memo)],
-      lists:foldl(fun(E,Acc) -> union_vdnf(E, Acc) end, X, Xs)
-    end, fun(VDnf1, VDnf2) -> 
-      intersect_vdnf(VDnf1(), VDnf2()) end}).
 
 -spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
 negate_flag_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
@@ -172,7 +148,7 @@ negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
     end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1(), Dnf2()) end}).
 
 % intersection and union for ty, corecursive
-% Here, we have to operands for memoization. 
+% Here, we have two operands for memoization. 
 % We memoize the intersection operation Ty & Ty2 as {Ty, Ty2}
 % and the result equation as NewTy
 % Whenever the intersection operation on Ty & Ty2 is encountered
@@ -186,35 +162,22 @@ intersect(Ty, Ty2, Memo) when is_function(Ty), is_function(Ty2) ->
     _ -> fun NewTy() -> intersect(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
   end;
 intersect(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
-  #ty{flag = intersect_vdnf(F1, F2), product = intersect_vdnf(P1, P2)}.
+  #ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}.
 
 union(Ty, Ty2, Memo) when is_function(Ty) -> 
   case Memo of #{Ty := NewTy} -> error(todo), NewTy;
     _ -> fun NewTy() -> union(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
   end;
 union(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
-  #ty{flag = union_vdnf(F1, F2), product = union_vdnf(P1, P2)}.
+  #ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}.
 
 
-
-% We now define the remaining union and intersection operators for both levels
-% union is list concatenation
-union_vdnf(A, B) -> A ++ B.
-% intersection is cross product
-intersect_vdnf(A, B) -> 
-  [{PV1 ++ PV2, NV1 ++ NV2, intersect_dnf(T1, T2)} || {PV1, NV1, T1} <- A, {PV2, NV2, T2} <- B].
-union_dnf(A, B) -> lists:uniq(A ++ B). % TODO why is unique important?
+% lists:uniq is very important here
+% equations which differ produce a new type which is not memoized, yet equivalent to a previously memoized type
+% e.g. (Any, Any) & (Any, Any) should be represented as (Any, Any)
+% Erlang is then able to hash two closures to the same value
+union_dnf(A, B) -> lists:uniq(A ++ B). 
 intersect_dnf(A, B) -> [{lists:uniq(P1 ++ P2), lists:uniq(N1 ++ N2)} || {P1, N1} <- A, {P2, N2} <- B].
-
-% Before we define emptyness,
-% a generic DNF walking method for vdnf and dnf is useful
-% variable + atoms dnf line
-vdnf([{PVars, NVars, LeafDnf}], {Process, _Combine}) ->
-  Process(PVars, NVars, LeafDnf);
-vdnf([{PVars, NVars, LeafDnf} | Cs], F = {Process, Combine}) ->
-  Res1 = fun() -> Process(PVars, NVars, LeafDnf) end,
-  Res2 = fun() -> vdnf(Cs, F) end,
-  Combine(Res1, Res2).
 
 % flag/product dnf line
 dnf([{Pos, Neg}], {Process, _Combine}) ->
@@ -231,54 +194,35 @@ is_empty(Ty) ->
 is_empty(Ty, Memo) when is_function(Ty) -> 
   case Memo of
     % use the codefinition for a memoized type: it is assumed to be empty
-    #{Ty := true} -> io:format(user,"X", []), true;
+    #{Ty := true} -> true;
     _ -> 
       is_empty(Ty(), Memo#{Ty => true})
   end;
-is_empty(#ty{flag = FlagVDnf, product = ProdVDnf}, Memo) ->
-  is_empty_flag(FlagVDnf, Memo)
-  and is_empty_prod(ProdVDnf, Memo).
+is_empty(#ty{flag = FlagDnf, product = ProdDnf}, Memo) ->
+  is_empty_flag(FlagDnf, Memo)
+  and is_empty_prod(ProdDnf, Memo).
 
 % flag emptyness, empty iff:
 %  * (variable occurs in both pos and neg position) or (true in N)
 % We can ignore variables for emptyness checks (after pos neg elimination) because t & alpha empty iff t empty
-is_empty_flag(FlagVDnf, _Memo) -> % memo not needed, no corecursive components
-  vdnf(FlagVDnf, {
-    fun(PosVars, NegVars, FlagDnf) -> 
-      case sets:is_empty(sets:intersection(sets:from_list(PosVars), sets:from_list(NegVars))) of
-        true -> dnf(FlagDnf, {fun(_Pos, Neg) -> not sets:is_empty(sets:from_list(Neg)) end, fun(R1, R2) -> R1() and R2() end});
-        false -> true % p & !p in coclause -> coclause is empty
-      end
-    end, 
-    fun(CoclauseEmtpy1, CoclauseEmpty2) -> CoclauseEmtpy1() and CoclauseEmpty2() end}).
+is_empty_flag(FlagDnf, _Memo) -> % memo not needed, no corecursive components
+  dnf(FlagDnf, {fun(_Pos, Neg) -> not sets:is_empty(sets:from_list(Neg)) end, fun(R1, R2) -> R1() and R2() end}).
 
 % product emptyness, empty iff:
 %  * (variable occurs in both pos and neg position) or product dnf empty
-is_empty_prod(ProdVDnf, Memo) ->
-  vdnf(ProdVDnf, {
-    fun(PosVars, NegVars, ProductDnf) -> 
-      case sets:is_empty(sets:intersection(sets:from_list(PosVars), sets:from_list(NegVars))) of
-        true -> is_empty_pdnf(ProductDnf, Memo);
-        false -> true % p & !p in coclause -> coclause is empty
-      end
-    end, 
-    fun(CoclauseEmtpy1, CoclauseEmpty2) -> CoclauseEmtpy1() and CoclauseEmpty2() end}).
-
-is_empty_pdnf(Dnf, Memo) ->
+is_empty_prod(Dnf, Memo) ->
   dnf(Dnf, {
     fun(Pos, Neg) -> 
       BigP = big_intersect(Pos),
       phi(pi1(BigP), pi2(BigP), Neg, Memo)
     end, 
-    fun(R1, R2) -> 
-      R1() and R2()
-    end
+    fun(R1, R2) -> R1() and R2() end
   }).
 
 pi1({Ty, _}) -> Ty.
 pi2({_, Ty}) -> Ty.
 
-big_intersect([]) -> {fun any/0, fun any/0};
+big_intersect([]) -> {any(), any()};
 big_intersect([X]) -> X;
 big_intersect([{Ty1, Ty2}, {Ty3, Ty4} | Xs]) -> 
   NewL = intersect(Ty1, Ty3),
@@ -291,9 +235,6 @@ phi(S1, S2, N, Memo) ->
   phi(S1, S2, N, empty(), empty(), Memo).
 phi(S1, S2, [], T1, T2, Memo) ->
   Int1 = intersect(S1, neg(T1)),
-  io:format(user,"Checking emptyness of ~p~n", [{erlang:phash2(Int1), Int1, Int1()}]),
-  io:format(user,"Is already in memo? ~p~n", [{erlang:phash2(Int1), maps:find(Int1, Memo)}]),
-  %timer:sleep(500),
   Res1 = is_empty(Int1, Memo),
   Res2 = is_empty(intersect(S2, neg(T2)), Memo),
   Res1 or Res2;
@@ -312,38 +253,44 @@ phi(S1, S2, [Ty | N], Left, Right, Memo) ->
 -include_lib("eunit/include/eunit.hrl").
 
 usage_test() ->
-    A = fun any/0,
-    io:format(user,"Any: ~p (~p) ~n~p~n", [A, erlang:phash2(A), A()]),
-    
-    % negation:
-    Aneg = neg(A),
-    io:format(user,"Empty: ~p~n", [Aneg]),
-    io:format(user,"Empty unfolded: ~p~n", [Aneg()]),
+  A = any(),
+  io:format(user,"Any: ~p (~p) ~n~p~n", [A, erlang:phash2(A), A()]),
+  
+  % negation:
+  Aneg = neg(A),
+  io:format(user,"Empty: ~p~n", [Aneg]),
+  io:format(user,"Empty unfolded: ~p~n", [Aneg()]),
 
-    %intersection of same recursive equations
-    Ai = intersect(A, A),
-    io:format(user,"Any & Any: ~p~n", [{Ai, Ai()}]),
+  %intersection of same recursive equations
+  Ai = intersect(A, A),
+  io:format(user,"Any & Any: ~p~n", [{Ai, Ai()}]),
 
-    % % double negation
-    Anegneg = neg(neg(A)),
-    io:format(user,"Any: ~p~n", [Anegneg]),
-    io:format(user,"Any unfolded: ~p~n", [Anegneg()]),
+  % % double negation
+  Anegneg = neg(neg(A)),
+  io:format(user,"Any: ~p~n", [Anegneg]),
+  io:format(user,"Any unfolded: ~p~n", [Anegneg()]),
 
-    % % We cannot trust the name generated for the corecursive equations (Erlang funs):
-    F1 = io_lib:format("~p", [Aneg]),
-    F2 = io_lib:format("~p", [Anegneg]),
-    true = (F1 =:= F2),
-    false = (Aneg =:= Anegneg),
+  % % We cannot trust the name generated for the corecursive equations (Erlang funs):
+  F1 = io_lib:format("~p", [Aneg]),
+  F2 = io_lib:format("~p", [Anegneg]),
+  true = (F1 =:= F2),
+  false = (Aneg =:= Anegneg),
 
-    % is_empty
-    io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
-    io:format(user,"Empty is empty: ~p~n", [is_empty(Aneg)]),
+  % is_empty
+  io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
+  false = is_empty(A),
+  io:format(user,"Empty is empty: ~p~n", [is_empty(Aneg)]),
+  true = is_empty(Aneg),
 
-    X = fun Z() -> #ty{
-                      flag = var_atom(flag()), 
-                      product = var_atom(product(Z, Z))
-    } end,
-    io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
-    ok.
+  % define a custom any type
+  X = fun Z() -> #ty{
+                    flag = flag(), 
+                    product = product(Z, Z)
+  } end,
+  % it's different from the any equation return by any()
+  true = X /= any(),
+  io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
+  false = is_empty(X),
+  ok.
 
 -endif.
