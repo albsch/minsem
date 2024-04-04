@@ -37,7 +37,7 @@
 -type flag() :: true.
 
 % ty_ref, ty_rec are implementation specific
--record(ty, {flag :: dnf(flag()), product :: dnf(product())}).
+-record(ty, {flag = negated_flag() :: dnf(flag()), product :: dnf(product())}). % by default, flag is set to empty
 -type ty_ref () :: fun(() -> ty()).
 -type ty_rec () :: #ty{}.
 
@@ -291,6 +291,21 @@ usage_test() ->
   true = X /= any(),
   io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
   false = is_empty(X),
+
+
+  % (X, (X, [])) where X = (X, []) | ([], [])
+  JustTrue = fun() -> #ty{flag = flag(), product = product(empty(), empty())} end,
+  false = is_empty(JustTrue),
+  RX = fun X() -> #ty{
+    product = union_dnf(product(X, JustTrue), product(JustTrue, JustTrue))
+  } end,
+  false = is_empty(RX),
+  RXX = fun() -> 
+    InnerProd = fun() -> #ty{product = product(RX, JustTrue)} end,
+    #ty{product = product(RX, InnerProd)} 
+  end,
+  false = is_empty(RXX),
+
   ok.
 
 -endif.
