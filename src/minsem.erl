@@ -182,14 +182,14 @@ intersect(Ty, Ty2) -> intersect(Ty, Ty2, #{}).
 union(Ty, Ty2) -> union(Ty, Ty2, #{}).
 
 intersect(Ty, Ty2, Memo) when is_function(Ty), is_function(Ty2) -> 
-  case Memo of #{Ty := NewTy} -> NewTy;
+  case Memo of #{Ty := NewTy} -> error(todo),NewTy;
     _ -> fun NewTy() -> intersect(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
   end;
 intersect(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
   #ty{flag = intersect_vdnf(F1, F2), product = intersect_vdnf(P1, P2)}.
 
 union(Ty, Ty2, Memo) when is_function(Ty) -> 
-  case Memo of #{Ty := NewTy} -> NewTy;
+  case Memo of #{Ty := NewTy} -> error(todo), NewTy;
     _ -> fun NewTy() -> union(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
   end;
 union(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
@@ -231,7 +231,7 @@ is_empty(Ty) ->
 is_empty(Ty, Memo) when is_function(Ty) -> 
   case Memo of
     % use the codefinition for a memoized type: it is assumed to be empty
-    #{Ty := true} -> true;
+    #{Ty := true} -> io:format(user,"X", []), true;
     _ -> 
       is_empty(Ty(), Memo#{Ty => true})
   end;
@@ -291,6 +291,9 @@ phi(S1, S2, N, Memo) ->
   phi(S1, S2, N, empty(), empty(), Memo).
 phi(S1, S2, [], T1, T2, Memo) ->
   Int1 = intersect(S1, neg(T1)),
+  io:format(user,"Checking emptyness of ~p~n", [{erlang:phash2(Int1), Int1, Int1()}]),
+  io:format(user,"Is already in memo? ~p~n", [{erlang:phash2(Int1), maps:find(Int1, Memo)}]),
+  %timer:sleep(500),
   Res1 = is_empty(Int1, Memo),
   Res2 = is_empty(intersect(S2, neg(T2)), Memo),
   Res1 or Res2;
@@ -335,6 +338,12 @@ usage_test() ->
     % is_empty
     io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
     io:format(user,"Empty is empty: ~p~n", [is_empty(Aneg)]),
+
+    X = fun Z() -> #ty{
+                      flag = var_atom(flag()), 
+                      product = var_atom(product(Z, Z))
+    } end,
+    io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
     ok.
 
 -endif.
