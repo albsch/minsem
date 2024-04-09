@@ -23,8 +23,7 @@
 
 % A type is either a lazy reference represented as a function to be evaluated
 % or a disjoint union of flags and products.
-% The flag and product types are represented as a two-layered DNF.
-% The outer layer contains type variables, the inner layer contains the DNF of the type at hand.
+% The flag and product types are represented as a DNF.
 % These disjoint unions will be denoted by 'U.' instead of the regular union 'U' to 
 % highlight that negations in one union will not leak into the other union,
 % e.g. true ∉ !{true, true}.
@@ -44,10 +43,16 @@
 % Since Erlang does not support memoization natively, we need to track visiting left-hand side equation references manually in a set
 -type memo() :: #{}.
 
-% A DNF<X> is a disjunction represented as a list of coclauses.
-% A coclause is represented as a pair of positive and negative Xs components in two lists.
+% A DNF<X> is a disjunction represented as a list of lines.
+% A line is represented as a pair of positive and negative Xs components in two lists.
 % An example DNF of products: [{[{true*, true*}], []}, {[], [{false*, true*}]}] == {true, true} | !{false, true}
 % Note that inside the products, true* and false* are actually ty_ref() again and unfold to a full ty_rec().
+% It is important for termination to choose the DNF representation appropriately.
+% Termination is valid only modulo or up-to alpha-equivalence and type equivalency up to boolean tautologies (e.g. t and t&t)
+% Alpha-equivalence is handled by the hashing mechanism of Erlang for Erlang funs.
+% Boolean tautology equivalence is handled by the DNF representation.
+% To ensure termination, the representation should share (some) tautologically equivalent boolean combinations.
+% It seems sufficient for termination to model the positive and negative parts of the DNF as a set instead of a list.
 -type dnf(Atom) :: [{[Atom], [Atom]}]. 
 
 % Constructors for flags and products at the DNF level
@@ -66,17 +71,26 @@ product(P) -> [{[P], []}].
 -spec negated_product(product()) -> dnf(product()).
 negated_product(P) -> [{[], [P]}].
 
+-spec ty(dnf(flag()), dnf(product())) -> ty_rec().
+ty(Flag, Product) -> #ty{flag = Flag, product = Product}.
+
+-spec ty_flag(dnf(flag())) -> ty_rec().
+ty_flag(Flag) -> #ty{flag = Flag, product = product(empty(), empty())}.
+
+-spec ty_product(dnf(product())) -> ty_rec().
+ty_product(Product) -> #ty{flag = negated_flag(), product = Product}.
+
 % We can now define the corecursive Top type:
 % Any = true U. {Any, Any}
 -spec any() -> ty().
 any() -> fun Any() -> #ty{
-    % Notice that we introduce the equation name 'Any' (the constant function reference) and 
+    % Notice that we introduce the equation name 'Any' (the function reference) and 
     % use it in the right-hand side of the equation in the product constructor
-    % The return type of this function is strictly speaking a new equation
-    % Luckily, erlang hashes the (AST) same closures to the same hash value
+    % The return value of this function is strictly speaking a new equation (a frfesh function reference)
+    % Luckily, erlang hashes the same closures (AST with its bound values) to the same hash value
     % so it won't happen that a type equation is created when an "old" type equation already memoized is expected
     % e.g. X = {true, true} & {true, true} -> should be hashed as X = {true, true}, and not a new X2 = {true, true} & {true, true} with X2 /= X
-    % Otherwise, we would need to implement hashing module alpha renaming ourselves
+    % Otherwise, we would need to implement hashing ourselves
     flag = flag(),
     product = product(Any, Any)
   } end.
@@ -85,7 +99,7 @@ any() -> fun Any() -> #ty{
 % we need to define the corecursive operator: negation.
 % !Any = false U. !{Any, Any}
 -spec empty() -> ty().
-empty() -> neg(any()).
+empty() -> negate(any()).
 
 % A corecursive function consists of both a regular definition
 % and its codefinition.
@@ -96,45 +110,67 @@ empty() -> neg(any()).
 % we need to track function calls explicitly in a memoization set.
 % The Erlang manual mentions that a maps-backed set 
 % is the most efficient set implementation up to date for our use case.
--spec neg(ty_ref()) -> ty_ref().
-neg(Ty) -> 
-  neg(Ty, #{}).
+% We use a generic function 'corec_ref/3' for corecursive function application.
+% This definition is used to initiate a corecursive negation
+-spec negate(ty_ref()) -> ty_ref().
+negate(Ty) -> corec_ref(Ty, #{}, fun negate/2).
 
--spec neg
-(ty_ref(), memo()) -> ty_ref(); % this branch is similar for all corecursive functions TODO abstract?
-(ty_rec(), memo()) -> ty_rec().
-% if Ty is a reference, memoization needs to be checked
-neg(Ty, Memo) when is_function(Ty) -> 
+% we define two corecursive helper operators: 
+% one that introduces new equations and one for constant term memoizations
+corec_ref(Corec, Memo, Continue) -> corec(Corec, Memo, Continue, reference).
+corec_const(Corec, Memo, Continue, Const) -> corec(Corec, Memo, Continue, {const, Const}).
+
+% A generic corecursion operator for type operators negation/union/intersection 
+% and other constant corecursive functions (is_empty)
+% We track the codefinition inside the memoization map
+% If a corecursive call is encountered, use the mapped codefinition in the map
+% The operator provides two ways of specifying memoization: 
+% a constant term memoization (used for e.g. is_empty, Boolean return) 
+% and a new equation reference memoization (used for e.g. type operators)
+-spec corec
+([ty_ref()], memo(), fun(([ty_rec()], memo()) -> ty_rec()), reference) -> ty_ref();
+( ty_ref() , memo(), fun(( ty_rec() , memo()) -> ty_rec()), reference) -> ty_ref();
+([ty_ref()], memo(), fun(([ty_rec()], memo()) -> ty_rec()), {const, Const}) -> Const;
+( ty_ref() , memo(), fun(( ty_rec() , memo()) -> ty_rec()), {const, Const}) -> Const.
+corec(Corec, Memo, Continue, Type) ->
   case Memo of
     % given a memoized type, use the codefinition; in this case the new equation left-hand side
     % note: depending on the datastructure this branch will never be taken
     % e.g. in our dnf implementation, a type A is negated by 
-    % just changing its position from {[A], []} to {[], [A]} in a coclause.
-    % If negation is not again applied on A, the corecursive case is never triggered
+    % just changing its position from {[A], []} to {[], [A]} in a line.
+    % If the operation is not again applied on A, the corecursive case is never triggered
     % As we are using a map anyway, we add the corecursive case to the memoization set for convenience
-    #{Ty := NewTy} -> NewTy;
+    #{Corec := Codefinition} -> Codefinition;
     _ -> 
-      % Wrap the new negated type in a new reference,
-      % 'unfold' the type, memoize, and negate.
-      % This new reference NewTy is a neq corecursive equation.
-      % Every function in general that handles a ty() is corecursive.
-      % Will this new reference always result in a new equation? No. (see comment on the any() function)
-      fun NewTy() -> neg(Ty(), Memo#{Ty => NewTy}) end
-  end;
-% negation delegates the operation onto its components
-% since the components are made of a two layered DNF structure, 
-% we use a generic vdnf traversal and specific dnf traverals for flags and products
-% the variable negation function is supplied with a function which knows how to negate its components
-neg(#ty{flag = F, product = Prod}, M) -> 
+      % to allow for multiple arguments, Corec can be supplied as a list of references to unfold
+      UnfoldMaybeList = fun(L) when is_list(L) -> [T() || T <- L]; (L) -> L() end,
+      case Type of 
+        % 'unfold' the input(s), memoize, and apply Continue.
+        % This new reference NewRef is a new corecursive equation.
+        % Every function in general that handles a ty() is corecursive.
+        % Will this new reference always result in a new equation? No. (see comment on the any() function)
+        reference -> fun NewRef() -> Continue(UnfoldMaybeList(Corec), Memo#{Corec => NewRef}) end;
+        % 'unfold' the input(s), memoize the constant term, and apply Continue.
+        {const, Const} -> Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const})
+      end
+  end.
+
+
+-spec negate(ty_ref(), memo()) -> ty_ref(); (ty_rec(), memo()) -> ty_rec().
+% This definition is used to continue a (nested) corecursive negation
+negate(Ty, Memo) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/2);
+% Negation delegates the operation onto its components.
+% Since the components are made of a DNF structure, 
+% we use a generic dnf traversal for flags and products
+negate(#ty{flag = F, product = Prod}, M) -> 
   FlagDnf = negate_flag_dnf(F, M),
   ProductDnf = negate_product_dnf(Prod, M),
   #ty{flag = FlagDnf, product = ProductDnf}.
 
-
 -spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
 negate_flag_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
-  % similar to the variable case, for each coclause (Pvars, Nvars), we flip the atom signs
-  % for two flipped coclauses, we intersect them
+  % for each line (Pos, Neg), we flip the atom signs
+  % for two flipped lines, we intersect them
   dnf(Dnf, {fun(P, N) -> 
       [X | Xs] = [negated_flag() || true <- P] ++ [flag() || true <- N],
       lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs)
@@ -154,97 +190,85 @@ negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
 % Whenever the intersection operation on Ty & Ty2 is encountered
 % we return the memoized result NewTy
 % In our implementation, the corecursive case is never triggered
-intersect(Ty, Ty2) -> intersect(Ty, Ty2, #{}).
-union(Ty, Ty2) -> union(Ty, Ty2, #{}).
+-spec intersect(ty_ref(), ty_ref()) -> ty_ref().
+intersect(Ty, Ty2) -> corec_ref([Ty, Ty2], #{}, fun cintersect/2).
+-spec union(ty_ref(), ty_ref()) -> ty_ref().
+union(Ty, Ty2) -> corec_ref([Ty, Ty2], #{}, fun cunion/2).
 
-intersect(Ty, Ty2, Memo) when is_function(Ty), is_function(Ty2) -> 
-  case Memo of #{Ty := NewTy} -> error(todo),NewTy;
-    _ -> fun NewTy() -> intersect(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
-  end;
-intersect(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
+% wrapper functions for single argument type operators
+-spec cintersect ([ty_ref()], memo()) -> ty_ref(); ([ty_rec()], memo()) -> ty_rec().
+cintersect([Ty, Ty2], Memo) when is_function(Ty), is_function(Ty2) -> corec_ref([Ty, Ty2], Memo, fun cintersect/2);
+cintersect([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo) ->
   #ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}.
 
-union(Ty, Ty2, Memo) when is_function(Ty) -> 
-  case Memo of #{Ty := NewTy} -> error(todo), NewTy;
-    _ -> fun NewTy() -> union(Ty(), Ty2(), Memo#{{Ty, Ty2} => NewTy}) end
-  end;
-union(#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}, _Memo) ->
+-spec cunion ([ty_ref()], memo()) -> ty_ref(); ([ty_rec()], memo()) -> ty_rec().
+cunion([Ty, Ty2], Memo) when is_function(Ty), is_function(Ty2) -> corec_ref([Ty, Ty2], Memo, fun cunion/2);
+cunion([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo) ->
   #ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}.
-
 
 % lists:uniq is very important here
 % equations which differ produce a new type which is not memoized, yet equivalent to a previously memoized type
 % e.g. (Any, Any) & (Any, Any) should be represented as (Any, Any)
 % Erlang is then able to hash two closures to the same value
+-spec union_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
 union_dnf(A, B) -> lists:uniq(A ++ B). 
+-spec intersect_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
 intersect_dnf(A, B) -> [{lists:uniq(P1 ++ P2), lists:uniq(N1 ++ N2)} || {P1, N1} <- A, {P2, N2} <- B].
 
 % flag/product dnf line
-dnf([{Pos, Neg}], {Process, _Combine}) ->
-  Process(Pos, Neg);
+-spec dnf(dnf(Atom), {fun(([Atom], [Atom]) -> Result), fun((fun(() -> Result), fun(() -> Result)) -> Result)}) -> Result.
+dnf([{Pos, Neg}], {Process, _Combine}) -> Process(Pos, Neg);
 dnf([{Pos, Neg} | Cs], F = {Process, Combine}) ->
   Res1 = fun() -> Process(Pos, Neg) end,
   Res2 = fun() -> dnf(Cs, F) end,
   Combine(Res1, Res2).
 
 % now for the main part, emptyness checking
+-spec is_empty(ty_ref()) -> boolean().
 is_empty(Ty) -> 
-  is_empty(Ty, #{}).
+  corec_const(Ty, #{}, fun is_empty/2, true).
 
-is_empty(Ty, Memo) when is_function(Ty) -> 
-  case Memo of
-    % use the codefinition for a memoized type: it is assumed to be empty
-    #{Ty := true} -> true;
-    _ -> 
-      is_empty(Ty(), Memo#{Ty => true})
-  end;
+-spec is_empty(ty_ref(), memo()) -> boolean(); (ty_rec(), memo()) -> boolean().
+is_empty(Ty, Memo) when is_function(Ty) -> corec_const(Ty, Memo, fun is_empty/2, true);
 is_empty(#ty{flag = FlagDnf, product = ProdDnf}, Memo) ->
-  is_empty_flag(FlagDnf, Memo)
-  and is_empty_prod(ProdDnf, Memo).
+  % 'and' does not short-circuit.
+  % Usually, if non-emptyness arises from a non-empty flag, we don't need to descend into the corecursive product part.
+  % Algorithm still terminates because of memoization (Erlang-specific hashing of fun values) and appropriate DNF representation.
+  is_empty_flag(FlagDnf, Memo) and is_empty_prod(ProdDnf, Memo). 
 
-% flag emptyness, empty iff:
-%  * (variable occurs in both pos and neg position) or (true in N)
-% We can ignore variables for emptyness checks (after pos neg elimination) because t & alpha empty iff t empty
+-spec is_empty_flag(dnf(flag()), memo()) -> boolean().
+% flag emptyness, empty iff: (true in N)
 is_empty_flag(FlagDnf, _Memo) -> % memo not needed, no corecursive components
   dnf(FlagDnf, {fun(_Pos, Neg) -> not sets:is_empty(sets:from_list(Neg)) end, fun(R1, R2) -> R1() and R2() end}).
 
-% product emptyness, empty iff:
-%  * (variable occurs in both pos and neg position) or product dnf empty
+-spec is_empty_prod(dnf(product()), memo()) -> boolean().
+% product emptyness, empty iff: product dnf empty
 is_empty_prod(Dnf, Memo) ->
   dnf(Dnf, {
     fun(Pos, Neg) -> 
-      BigP = big_intersect(Pos),
-      phi(pi1(BigP), pi2(BigP), Neg, Memo)
+      % intersect all positive products, and execute full tree exploration phi
+      {Ty1, Ty2} = big_intersect(Pos),
+      phi(Ty1, Ty2, Neg, Memo)
     end, 
     fun(R1, R2) -> R1() and R2() end
   }).
 
-pi1({Ty, _}) -> Ty.
-pi2({_, Ty}) -> Ty.
-
+-spec big_intersect([product()]) -> product().
 big_intersect([]) -> {any(), any()};
 big_intersect([X]) -> X;
 big_intersect([{Ty1, Ty2}, {Ty3, Ty4} | Xs]) -> 
-  NewL = intersect(Ty1, Ty3),
-  NewR = intersect(Ty2, Ty4),
-  big_intersect([{NewL, NewR} | Xs]).
+  big_intersect([{intersect(Ty1, Ty3), intersect(Ty2, Ty4)} | Xs]).
 
 % Φ(S1 , S2 , ∅ , T1 , T2) = (S1<:T1) or (S2<:T2)
 % Φ(S1 , S2 , N ∪ {T1, T2} , Left , Right) = Φ(S1 , S2 , N , Left | T1 , Right) and Φ(S1 , S2 , N , Left , Right | T2)
-phi(S1, S2, N, Memo) -> 
-  phi(S1, S2, N, empty(), empty(), Memo).
+-spec phi(ty_ref(), ty_ref(), [ty_ref()], memo()) -> boolean().
+phi(S1, S2, N, Memo) -> phi(S1, S2, N, empty(), empty(), Memo).
+
+-spec phi(ty_ref(), ty_ref(), [ty_ref()], ty_ref(), ty_ref(), memo()) -> boolean().
 phi(S1, S2, [], T1, T2, Memo) ->
-  Int1 = intersect(S1, neg(T1)),
-  Res1 = is_empty(Int1, Memo),
-  Res2 = is_empty(intersect(S2, neg(T2)), Memo),
-  Res1 or Res2;
-phi(S1, S2, [Ty | N], Left, Right, Memo) ->
-  T1 = pi1(Ty),
-  T2 = pi2(Ty),
-  U = union(Left, T1),
-  Res = (phi(S1, S2, N, U, Right, Memo)),
-  Res2 = (phi(S1, S2, N , Left, union(Right,T2), Memo)),
-  Res and Res2.
+  is_empty(intersect(S1, negate(T1)), Memo) or is_empty(intersect(S2, negate(T2)), Memo);
+phi(S1, S2, [{T1, T2} | N], Left, Right, Memo) ->
+  phi(S1, S2, N, union(Left, T1), Right, Memo) and phi(S1, S2, N , Left, union(Right,T2), Memo).
   
 
 
@@ -257,7 +281,7 @@ usage_test() ->
   io:format(user,"Any: ~p (~p) ~n~p~n", [A, erlang:phash2(A), A()]),
   
   % negation:
-  Aneg = neg(A),
+  Aneg = negate(A),
   io:format(user,"Empty: ~p~n", [Aneg]),
   io:format(user,"Empty unfolded: ~p~n", [Aneg()]),
 
@@ -266,15 +290,17 @@ usage_test() ->
   io:format(user,"Any & Any: ~p~n", [{Ai, Ai()}]),
 
   % % double negation
-  Anegneg = neg(neg(A)),
+  Anegneg = negate(negate(A)),
   io:format(user,"Any: ~p~n", [Anegneg]),
   io:format(user,"Any unfolded: ~p~n", [Anegneg()]),
 
   % % We cannot trust the name generated for the corecursive equations (Erlang funs):
+  io:format(user,"Refs Aneg vs Anegneg: ~p vs ~p~nHashes Aneg vs Anegeg: ~p vs ~p~n", [Aneg, Anegneg, erlang:phash2(Aneg), erlang:phash2(Anegneg)]),
   F1 = io_lib:format("~p", [Aneg]),
   F2 = io_lib:format("~p", [Anegneg]),
   true = (F1 =:= F2),
   false = (Aneg =:= Anegneg),
+  false = (erlang:phash2(Aneg) =:= erlang:phash2(Anegneg)),
 
   % is_empty
   io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
@@ -283,26 +309,20 @@ usage_test() ->
   true = is_empty(Aneg),
 
   % define a custom any type
-  X = fun Z() -> #ty{
-                    flag = flag(), 
-                    product = product(Z, Z)
-  } end,
+  X = fun Z() -> ty(flag(), product(Z, Z)) end,
   % it's different from the any equation return by any()
   true = X /= any(),
   io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
   false = is_empty(X),
 
-
   % (X, (X, [])) where X = (X, []) | ([], [])
-  JustTrue = fun() -> #ty{flag = flag(), product = product(empty(), empty())} end,
+  JustTrue = fun() -> ty_flag(flag()) end,
   false = is_empty(JustTrue),
-  RX = fun X() -> #ty{
-    product = union_dnf(product(X, JustTrue), product(JustTrue, JustTrue))
-  } end,
+  RX = fun XX() -> ty_product( union_dnf(product(XX, JustTrue), product(JustTrue, JustTrue)) ) end,
   false = is_empty(RX),
   RXX = fun() -> 
-    InnerProd = fun() -> #ty{product = product(RX, JustTrue)} end,
-    #ty{product = product(RX, InnerProd)} 
+    InnerProd = fun() -> ty_product(product(RX, JustTrue)) end,
+    ty_product(product(RX, InnerProd))
   end,
   false = is_empty(RXX),
 

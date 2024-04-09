@@ -1,5 +1,7 @@
 .rebar3
-_*
+_build
+_checkouts
+_vendor
 .eunit
 *.o
 *.beam
@@ -12,7 +14,6 @@ log
 erl_crash.dump
 .rebar
 logs
-_build
 .idea
 *.iml
 rebar3.crashdump

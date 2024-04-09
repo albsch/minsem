@@ -1,0 +1,8 @@
+{application, minsem,
+ [{description, "Minimal semantic subtyping library"},
+  {vsn, "v1"},
+  {applications,
+   [kernel,
+    stdlib
+   ]}
+ ]}.
