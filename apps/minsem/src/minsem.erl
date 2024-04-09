@@ -89,8 +89,9 @@ any() -> fun Any() -> #ty{
     % The return value of this function is strictly speaking a new equation (a frfesh function reference)
     % Luckily, erlang hashes the same closures (AST with its bound values) to the same hash value
     % so it won't happen that a type equation is created when an "old" type equation already memoized is expected
-    % e.g. X = {true, true} & {true, true} -> should be hashed as X = {true, true}, and not a new X2 = {true, true} & {true, true} with X2 /= X
-    % Otherwise, we would need to implement hashing ourselves
+    % e.g. X = {true, true} & {X, X} should be hashed to the same value as another equation X' = {true, true} & {X', X'}.
+    % Otherwise, we the algorithm does not terminate and we would need to implement hashing ourselves, 
+    % to capture alpha-equivalency in the hash
     flag = flag(),
     product = product(Any, Any)
   } end.
@@ -315,7 +316,7 @@ usage_test() ->
   io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
   false = is_empty(X),
 
-  % (X, (X, [])) where X = (X, []) | ([], [])
+  % (X, (X, true)) where X = (X, true) | (true, true)
   JustTrue = fun() -> ty_flag(flag()) end,
   false = is_empty(JustTrue),
   RX = fun XX() -> ty_product( union_dnf(product(XX, JustTrue), product(JustTrue, JustTrue)) ) end,
@@ -325,6 +326,29 @@ usage_test() ->
     ty_product(product(RX, InnerProd))
   end,
   false = is_empty(RXX),
+
+  % interleaving corecursion
+  % (true, A) where 
+  % A = (B, true) | (true, true)
+  % B = (true, A)
+  Ty = fun() -> 
+    fun A() ->
+      TyB = fun B() -> ty_product(product(JustTrue, A)) end,
+      ty_product( union_dnf(product(TyB, JustTrue), product(JustTrue, JustTrue)))
+    end
+  end,
+  false = is_empty(Ty),
+
+  % (true, A) where 
+  % A = (B, true)
+  % B = (true, A)
+  Ty2 = fun() -> 
+    fun A() ->
+      TyB = fun B() -> ty_product(product(JustTrue, A)) end,
+      ty_product( product(TyB, JustTrue) )
+    end
+  end,
+  true = is_empty(Ty2),
 
   ok.
 
