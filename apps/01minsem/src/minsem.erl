@@ -32,12 +32,15 @@
 %
 % The generic interface is defined by the top-level record ty() and its atom component types product() and flag().
 -type ty() :: ty_ref() | ty_rec().
+% A product bould either consist of equation references to be unfolded or concrete ty_rec() records.
+% To keep the interface consistent, type constructors always use equation references that need to be unfolded once upon visit.
 -type product() :: {ty_ref(), ty_ref()}.
 -type flag() :: true.
 
 % ty_ref, ty_rec are implementation specific
 -record(ty, {flag = negated_flag() :: dnf(flag()), product :: dnf(product())}). % by default, flag is set to empty
--type ty_ref () :: fun(() -> ty()).
+% a ty_ref is a closure that unfolds to a proper record
+-type ty_ref () :: fun(() -> ty_rec()).
 -type ty_rec () :: #ty{}.
 
 % Since Erlang does not support memoization natively, we need to track visiting left-hand side equation references manually in a set
@@ -48,8 +51,9 @@
 % An example DNF of products: [{[{true*, true*}], []}, {[], [{false*, true*}]}] == {true, true} | !{false, true}
 % Note that inside the products, true* and false* are actually ty_ref() again and unfold to a full ty_rec().
 % It is important for termination to choose the DNF representation appropriately.
-% Termination is valid only modulo or up-to alpha-equivalence and type equivalency up to boolean tautologies (e.g. t and t&t)
-% Alpha-equivalence is handled by the hashing mechanism of Erlang for Erlang funs.
+% Termination of all corecursive functions (e.g. emptyness check)
+% is valid only modulo or up-to equivalence of function references and type equivalency up to boolean tautologies (e.g. t and t&t)
+% function reference equivalence is handled by the hashing mechanism of Erlang for Erlang funs.
 % Boolean tautology equivalence is handled by the DNF representation.
 % To ensure termination, the representation should share (some) tautologically equivalent boolean combinations.
 % It seems sufficient for termination to model the positive and negative parts of the DNF as a set instead of a list.
@@ -62,7 +66,7 @@ flag() -> [{[true], []}].
 -spec negated_flag() -> dnf(true).
 negated_flag() -> [{[], [true]}].
 
--spec product(ty(), ty()) -> dnf(product()).
+-spec product(ty_ref(), ty_ref()) -> dnf(product()).
 product(A, B) -> [{[{A, B}], []}].
 
 -spec product(product()) -> dnf(product()).
@@ -90,7 +94,7 @@ any() -> fun Any() -> #ty{
     % Luckily, erlang hashes the same closures (AST with its bound values) to the same hash value
     % so it won't happen that a type equation is created when an "old" type equation already memoized is expected
     % e.g. X = {true, true} & {X, X} should be hashed to the same value as another equation X' = {true, true} & {X', X'}.
-    % Otherwise, we the algorithm does not terminate and we would need to implement hashing ourselves, 
+    % Otherwise, the algorithm does not terminate and we would need to implement hashing ourselves, 
     % to capture alpha-equivalency in the hash
     flag = flag(),
     product = product(Any, Any)
@@ -144,6 +148,7 @@ corec(Corec, Memo, Continue, Type) ->
     #{Corec := Codefinition} -> Codefinition;
     _ -> 
       % to allow for multiple arguments, Corec can be supplied as a list of references to unfold
+      % e.g. the type operators intersect and union use a list of arguments (the two type arguments)
       UnfoldMaybeList = fun(L) when is_list(L) -> [T() || T <- L]; (L) -> L() end,
       case Type of 
         % 'unfold' the input(s), memoize, and apply Continue.
@@ -190,7 +195,9 @@ negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
 % and the result equation as NewTy
 % Whenever the intersection operation on Ty & Ty2 is encountered
 % we return the memoized result NewTy
-% In our implementation, the corecursive case is never triggered
+% In our implementation, the corecursive case is never triggered,
+% as intersection and negation only moves the atoms in the lines around.
+% It does not recurse into an atom in a line.
 -spec intersect(ty_ref(), ty_ref()) -> ty_ref().
 intersect(Ty, Ty2) -> corec_ref([Ty, Ty2], #{}, fun cintersect/2).
 -spec union(ty_ref(), ty_ref()) -> ty_ref().
@@ -233,6 +240,7 @@ is_empty(Ty) ->
 is_empty(Ty, Memo) when is_function(Ty) -> corec_const(Ty, Memo, fun is_empty/2, true);
 is_empty(#ty{flag = FlagDnf, product = ProdDnf}, Memo) ->
   % 'and' does not short-circuit.
+  % We don't use 'andalso' (the short-circuiting operator) to ensure that the algorithm still terminates properly.
   % Usually, if non-emptyness arises from a non-empty flag, we don't need to descend into the corecursive product part.
   % Algorithm still terminates because of memoization (Erlang-specific hashing of fun values) and appropriate DNF representation.
   is_empty_flag(FlagDnf, Memo) and is_empty_prod(ProdDnf, Memo). 
@@ -270,9 +278,12 @@ phi(S1, S2, [], T1, T2, Memo) ->
   is_empty(intersect(S1, negate(T1)), Memo) or is_empty(intersect(S2, negate(T2)), Memo);
 phi(S1, S2, [{T1, T2} | N], Left, Right, Memo) ->
   phi(S1, S2, N, union(Left, T1), Right, Memo) and phi(S1, S2, N , Left, union(Right,T2), Memo).
-  
 
 
+
+% Exercises:
+% - Implement a better phi function
+% - Implement pretty printing (corecursive)
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
