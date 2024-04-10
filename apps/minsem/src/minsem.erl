@@ -175,14 +175,14 @@ negate_flag_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
   dnf(Dnf, {fun(P, N) -> 
       [X | Xs] = [negated_flag() || true <- P] ++ [flag() || true <- N],
       lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs)
-    end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1(), Dnf2()) end}).
+    end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1, Dnf2) end}).
 
 -spec negate_product_dnf(dnf(product()), memo()) -> dnf(product()).
 negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
   dnf(Dnf, {fun(P, N) -> 
       [X | Xs] = [negated_product(T) || T <- P] ++ [product(T) || T <- N],
       lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs)
-    end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1(), Dnf2()) end}).
+    end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1, Dnf2) end}).
 
 % intersection and union for ty, corecursive
 % Here, we have two operands for memoization. 
@@ -217,11 +217,11 @@ union_dnf(A, B) -> lists:uniq(A ++ B).
 intersect_dnf(A, B) -> [{lists:uniq(P1 ++ P2), lists:uniq(N1 ++ N2)} || {P1, N1} <- A, {P2, N2} <- B].
 
 % flag/product dnf line
--spec dnf(dnf(Atom), {fun(([Atom], [Atom]) -> Result), fun((fun(() -> Result), fun(() -> Result)) -> Result)}) -> Result.
+-spec dnf(dnf(Atom), {fun(([Atom], [Atom]) -> Result), fun((Result, Result) -> Result)}) -> Result.
 dnf([{Pos, Neg}], {Process, _Combine}) -> Process(Pos, Neg);
 dnf([{Pos, Neg} | Cs], F = {Process, Combine}) ->
-  Res1 = fun() -> Process(Pos, Neg) end,
-  Res2 = fun() -> dnf(Cs, F) end,
+  Res1 = Process(Pos, Neg),
+  Res2 = dnf(Cs, F),
   Combine(Res1, Res2).
 
 % now for the main part, emptyness checking
@@ -240,7 +240,7 @@ is_empty(#ty{flag = FlagDnf, product = ProdDnf}, Memo) ->
 -spec is_empty_flag(dnf(flag()), memo()) -> boolean().
 % flag emptyness, empty iff: (true in N)
 is_empty_flag(FlagDnf, _Memo) -> % memo not needed, no corecursive components
-  dnf(FlagDnf, {fun(_Pos, Neg) -> not sets:is_empty(sets:from_list(Neg)) end, fun(R1, R2) -> R1() and R2() end}).
+  dnf(FlagDnf, {fun(_Pos, Neg) -> not sets:is_empty(sets:from_list(Neg)) end, fun(R1, R2) -> R1 and R2 end}).
 
 -spec is_empty_prod(dnf(product()), memo()) -> boolean().
 % product emptyness, empty iff: product dnf empty
@@ -251,7 +251,7 @@ is_empty_prod(Dnf, Memo) ->
       {Ty1, Ty2} = big_intersect(Pos),
       phi(Ty1, Ty2, Neg, Memo)
     end, 
-    fun(R1, R2) -> R1() and R2() end
+    fun(R1, R2) -> R1 and R2 end
   }).
 
 -spec big_intersect([product()]) -> product().
@@ -332,8 +332,8 @@ usage_test() ->
   % A = (B, true) | (true, true)
   % B = (true, A)
   Ty = fun() -> 
-    fun A() ->
-      TyB = fun B() -> ty_product(product(JustTrue, A)) end,
+    fun TyA() ->
+      TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
       ty_product( union_dnf(product(TyB, JustTrue), product(JustTrue, JustTrue)))
     end
   end,
@@ -343,8 +343,8 @@ usage_test() ->
   % A = (B, true)
   % B = (true, A)
   Ty2 = fun() -> 
-    fun A() ->
-      TyB = fun B() -> ty_product(product(JustTrue, A)) end,
+    fun TyA() ->
+      TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
       ty_product( product(TyB, JustTrue) )
     end
   end,
