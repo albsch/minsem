@@ -4,11 +4,11 @@
 
 % This module implements a base implementation for the semantic subtyping framework for the limited type algebra 
 % 
-% t = true | alpha | t -> t | {t, t} | !t | t & t
+% t = true | t -> t | {t, t} | !t | t & t
 % 
-% In addition to the minimal grammar, type variables and arrows are now allowed.
+% In addition to the minimal grammar arrows are now allowed.
 % 
-% The generic interface is defined by the top-level record ty() and its atom component types product() and flag().
+% The generic interface is defined by the top-level record ty() and its atom component types product(), arrow() and flag().
 -type ty() :: ty_ref() | ty_rec().
 -type product() :: {ty_ref(), ty_ref()}.
 -type flag() :: true.
@@ -52,10 +52,10 @@ negated_product(P) -> [{[], [P]}].
 ty(Flag, Product, Arrow) -> #ty{flag = Flag, product = Product, arrow = Arrow}.
 
 % since we introduced arrows, we need to be able to define a type union with an empty arrow part
-% a single arrow type (s -> t) is never empty. 
+% a single arrow type (s -> t) is never empty for any s and t. 
 % The arrow which accepts any input and diverges (1 -> 0) is subset of any other arrow.
-% We do not yet want to introduce neutral elements for any and empty kinds, so we need to 
-% construct this "empty arrow part" ourselves with the appropriate line (any arrow A intersected with its negation !A).
+% We do not yet want to introduce neutral elements as special symbols for any and empty kinds, so we need to 
+% construct this "empty arrow part" ourselves with an appropriate line (any arrow A intersected with its negation !A).
 -spec ty_flag(dnf(flag())) -> ty_rec().
 ty_flag(Flag) -> #ty{flag = Flag, product = product(empty(), empty()), arrow = empty_arrow()}.
 
@@ -195,9 +195,6 @@ is_empty_prod(Dnf, Memo) ->
 -spec is_empty_arrow(dnf(arrow()), memo()) -> boolean().
 is_empty_arrow(Dnf, Memo) ->
   dnf(Dnf, {fun
-      % TODO explain why these two cases are necessary
-      % (_, []) -> false;
-      % ([], _) -> false;
       (Pos, Neg) -> 
         BigSTuple = lists:foldl(fun({arrow, S, _T}, Domain) -> union(S, Domain) end, empty(), Pos),
         is_empty_arrow_cont(BigSTuple, Pos, Neg, Memo)
@@ -205,6 +202,7 @@ is_empty_arrow(Dnf, Memo) ->
     fun(R1, R2) -> R1 and R2 end
   }).
 
+-spec is_empty_arrow_cont(ty_ref(), [ty_ref()], [ty_ref()], memo()) -> boolean().
 is_empty_arrow_cont(_, _, [], _Memo) -> false;
 is_empty_arrow_cont(BigS, Pos, [{arrow, T1, T2} | N], Memo) ->
   (
@@ -213,11 +211,11 @@ is_empty_arrow_cont(BigS, Pos, [{arrow, T1, T2} | N], Memo) ->
     %%    BigS is the union of all domains of the positive function intersections
     is_empty(intersect(T1, negate(BigS)), Memo)
       and
-      phi_arrow(T1, T2, Pos, Memo)
+      begin phi_arrow(T1, T2, Pos, Memo) end
   )
   %% Continue searching for another arrow ∈ N
     or
-    is_empty_arrow_cont(BigS, Pos, N, Memo).
+    begin is_empty_arrow_cont(BigS, Pos, N, Memo) end.
 
 -spec big_intersect([product()]) -> product().
 big_intersect([]) -> {any(), any()};
@@ -236,10 +234,13 @@ phi(S1, S2, [{T1, T2} | N], Left, Right, Memo) ->
 
 % phi from paper covariance and contravariance
 % phi(T1, T2, P0, P+, P-)
+-spec phi_arrow(ty_ref(), ty_ref(), [ty_ref()], memo()) -> boolean().
 phi_arrow(T1, T2, P, Memo) -> phi_arrow(T1, T2, P, empty(), any(), Memo).
+
+-spec phi_arrow(ty_ref(), ty_ref(), [ty_ref()], ty_ref(), ty_ref(), memo()) -> boolean().
 phi_arrow(T1, T2, [], D , C, Memo) ->
   % (T1 <: D) or (C <: T2)
-  is_empty(intersect(T1, negate(D)), Memo) or is_empty(intersect(C, negate(T2)));
+  is_empty(intersect(T1, negate(D)), Memo) or is_empty(intersect(C, negate(T2)), Memo);
 % phi(T1, T2, P U {S1 --> S2}, D, C)
 phi_arrow(T1, T2, [{arrow, S1, S2} | P], D, C, Memo) ->
   % phi(T1, T2, P, D, C&S2)
@@ -248,119 +249,128 @@ phi_arrow(T1, T2, [{arrow, S1, S2} | P], D, C, Memo) ->
     % phi(T1, T2, P, D|S1, C)
     phi_arrow(T1, T2, P, union(D, S1), C, Memo).
 
-
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
-
-% usage_test() ->
-%   A = any(),
-%   io:format(user,"Any: ~p (~p) ~n~p~n", [A, erlang:phash2(A), A()]),
-  
-%   % negation:
-%   Aneg = negate(A),
-%   io:format(user,"Empty: ~p~n", [Aneg]),
-%   io:format(user,"Empty unfolded: ~p~n", [Aneg()]),
-
-%   %intersection of same recursive equations
-%   Ai = intersect(A, A),
-%   io:format(user,"Any & Any: ~p~n", [{Ai, Ai()}]),
-
-%   % % double negation
-%   Anegneg = negate(negate(A)),
-%   io:format(user,"Any: ~p~n", [Anegneg]),
-%   io:format(user,"Any unfolded: ~p~n", [Anegneg()]),
-
-%   % % We cannot trust the name generated for the corecursive equations (Erlang funs):
-%   io:format(user,"Refs Aneg vs Anegneg: ~p vs ~p~nHashes Aneg vs Anegeg: ~p vs ~p~n", [Aneg, Anegneg, erlang:phash2(Aneg), erlang:phash2(Anegneg)]),
-%   F1 = io_lib:format("~p", [Aneg]),
-%   F2 = io_lib:format("~p", [Anegneg]),
-%   true = (F1 =:= F2),
-%   false = (Aneg =:= Anegneg),
-%   false = (erlang:phash2(Aneg) =:= erlang:phash2(Anegneg)),
-
-%   % is_empty
-%   io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
-%   false = is_empty(A),
-%   io:format(user,"Empty is empty: ~p~n", [is_empty(Aneg)]),
-%   true = is_empty(Aneg),
-
-%   % define a custom any type
-%   X = fun Z() -> ty(flag(), product(Z, Z), arrow(negate(Z), Z)) end,
-%   % it's different from the any equation return by any()
-%   true = X /= any(),
-%   io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
-%   false = is_empty(X),
-
-%   % (X, (X, true)) where X = (X, true) | (true, true)
-%   JustTrue = fun() -> ty_flag(flag()) end,
-%   false = is_empty(JustTrue),
-%   RX = fun XX() -> ty_product( union_dnf(product(XX, JustTrue), product(JustTrue, JustTrue)) ) end,
-%   false = is_empty(RX),
-%   RXX = fun() -> 
-%     InnerProd = fun() -> ty_product(product(RX, JustTrue)) end,
-%     ty_product(product(RX, InnerProd))
-%   end,
-%   false = is_empty(RXX),
-
-%   % interleaving corecursion
-%   % (true, A) where 
-%   % A = (B, true) | (true, true)
-%   % B = (true, A)
-%   Ty = fun() -> 
-%     fun TyA() ->
-%       TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
-%       ty_product( union_dnf(product(TyB, JustTrue), product(JustTrue, JustTrue)))
-%     end
-%   end,
-%   false = is_empty(Ty),
-
-%   % (true, A) where 
-%   % A = (B, true)
-%   % B = (true, A)
-%   Ty2 = fun() -> 
-%     fun TyA() ->
-%       TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
-%       ty_product( product(TyB, JustTrue) )
-%     end
-%   end,
-%   true = is_empty(Ty2),
-%   ok.
-
-arrow_test() ->
-  True = fun() -> ty_flag(flag()) end,
-  S = fun() -> ty_product(product(True, True)) end,
-  T = fun() -> ty_product(product(True, fun() -> ty_product(product(True, True)) end)) end,
-  U = fun() -> ty_product(product(fun() -> ty_product(product(True, True)) end, fun() -> ty_product(product(True, True)) end)) end,
-  V = fun() -> ty_product(product(fun() -> ty_product(product(True, True)) end, True)) end,
-  % [false = is_empty(intersect(T1, negate(T2))) || T1 <- [S, T, U, V], T2 <- [S, T, U, V], T1 /= T2],
-
-  % (S-->T)&(S-->U) <: S-->T&U
-  % true = is_empty(intersect(
-  %     intersect(fun() -> ty_arrow(arrow(S, T)) end, fun() -> ty_arrow(arrow(S, U)) end), 
-  %     negate(fun() -> ty_arrow(arrow(S, intersect(T, U))) end))
-  % ),
-  % (S-->U)&(T-->U) <: S|T-->U
-  Left = intersect(fun() -> ty_arrow(arrow(S, U)) end, fun() -> ty_arrow(arrow(T, U)) end), 
-  false = is_empty(Left),
-  Right = fun() -> ty_arrow(arrow(union(S, T), U)) end,
-  false = is_empty(Right),
-  false = is_empty(negate(Right)),
-  Ty = intersect(Left, negate(Right)),
-
-  io:format(user,"===============~n", []),
-  io:format(user,"Right: ~n~s~n", [print(negate(Right))]),
-  % io:format(user,"~s~n", [print(Ty)]),
-  % true = is_empty(Ty),
-  % (S | T) --> (U | V)  <:> ( S -> U | V ) & ( T -> U | V )
-  % (S | T) --> (U)  <:> ( S -> U ) & ( T -> U )
-  % (S | T) --> (U | V)  <:> ( S -> U | V ) & ( T -> U | V )
-
-  ok.
-
+-spec print(ty_ref()) -> string().
 print(Ty) ->
   Str = pretty:format([], [Ty], #{}),
   prettypr:format(Str, 200).
 
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+usage_test() ->
+  A = any(),
+  io:format(user,"Any: ~p (~p) ~n~p~n", [A, erlang:phash2(A), A()]),
+  
+  % negation:
+  Aneg = negate(A),
+  io:format(user,"Empty: ~p~n", [Aneg]),
+  io:format(user,"Empty unfolded: ~p~n", [Aneg()]),
+
+  %intersection of same recursive equations
+  Ai = intersect(A, A),
+  io:format(user,"Any & Any: ~p~n", [{Ai, Ai()}]),
+
+  % % double negation
+  Anegneg = negate(negate(A)),
+  io:format(user,"Any: ~p~n", [Anegneg]),
+  io:format(user,"Any unfolded: ~p~n", [Anegneg()]),
+
+  % % We cannot trust the name generated for the corecursive equations (Erlang funs):
+  io:format(user,"Refs Aneg vs Anegneg: ~p vs ~p~nHashes Aneg vs Anegeg: ~p vs ~p~n", [Aneg, Anegneg, erlang:phash2(Aneg), erlang:phash2(Anegneg)]),
+  F1 = io_lib:format("~p", [Aneg]),
+  F2 = io_lib:format("~p", [Anegneg]),
+  true = (F1 =:= F2),
+  false = (Aneg =:= Anegneg),
+  false = (erlang:phash2(Aneg) =:= erlang:phash2(Anegneg)),
+
+  % is_empty
+  io:format(user,"Any is empty: ~p~n", [is_empty(A)]),
+  false = is_empty(A),
+  io:format(user,"Empty is empty: ~p~n", [is_empty(Aneg)]),
+  true = is_empty(Aneg),
+
+  % define a custom any type
+  X = fun Z() -> ty(flag(), product(Z, Z), arrow(negate(Z), Z)) end,
+  % it's different from the any equation return by any()
+  true = X /= any(),
+  io:format(user,"Any (custom) is empty: ~p~n", [is_empty(X)]),
+  false = is_empty(X),
+
+  % (X, (X, true)) where X = (X, true) | (true, true)
+  JustTrue = fun() -> ty_flag(flag()) end,
+  false = is_empty(JustTrue),
+  RX = fun XX() -> ty_product( union_dnf(product(XX, JustTrue), product(JustTrue, JustTrue)) ) end,
+  false = is_empty(RX),
+  RXX = fun() -> 
+    InnerProd = fun() -> ty_product(product(RX, JustTrue)) end,
+    ty_product(product(RX, InnerProd))
+  end,
+  false = is_empty(RXX),
+
+  % interleaving corecursion
+  % (true, A) where 
+  % A = (B, true) | (true, true)
+  % B = (true, A)
+  Ty = fun() -> 
+    fun TyA() ->
+      TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
+      ty_product( union_dnf(product(TyB, JustTrue), product(JustTrue, JustTrue)))
+    end
+  end,
+  false = is_empty(Ty),
+
+  % (true, A) where 
+  % A = (B, true)
+  % B = (true, A)
+  Ty2 = fun() -> 
+    fun TyA() ->
+      TyB = fun() -> ty_product(product(JustTrue, TyA)) end,
+      ty_product( product(TyB, JustTrue) )
+    end
+  end,
+  true = is_empty(Ty2),
+  ok.
+
+arrow_test_() ->
+  % test cases getting slow!
+  % full exploration of the arrow types is very exponential 
+  {timeout, 100, fun() ->
+    True = fun() -> ty_flag(flag()) end,
+    % Encoding of 4 different types with flags and products
+    S = fun() -> ty_product(product(True, True)) end,
+    T = fun() -> ty_product(product(True, fun() -> ty_product(product(True, True)) end)) end,
+    U = fun() -> ty_product(product(fun() -> ty_product(product(True, True)) end, fun() -> ty_product(product(True, True)) end)) end,
+    V = fun() -> ty_product(product(fun() -> ty_product(product(True, True)) end, True)) end,
+    [false = is_empty(intersect(T1, negate(T2))) || T1 <- [S, T, U, V], T2 <- [S, T, U, V], T1 /= T2],
+
+    % (S-->T)&(S-->U) <: S-->T&U
+    fun() ->
+      Left = fun() -> ty_arrow(arrow(S, intersect(T, U))) end,
+      Right = intersect( fun() -> ty_arrow(arrow(S, T)) end, fun() -> ty_arrow(arrow(S, U)) end), 
+      true = is_empty(intersect(Left, negate(Right))),
+      true = is_empty(intersect(Right, negate(Left)))
+    end(),
+
+    % (S | T) --> (U | V)  <:> ( S -> U | V ) & ( T -> U | V )
+    fun() ->
+      Left = fun() -> ty_arrow(arrow(union(S, T), union(U, V))) end,
+      Right = intersect(fun() -> ty_arrow(arrow(S, union(U, V))) end, fun() -> ty_arrow(arrow(T, union(U, V))) end), 
+      true = is_empty(intersect(Left, negate(Right))),
+      true = is_empty(intersect(Right, negate(Left)))
+    end(),
+
+    % (S | T) --> (U)  <:> ( S -> U ) & ( T -> U )
+    fun() ->
+      Left = fun() -> ty_arrow(arrow(union(S, T), U)) end,
+      Right = intersect(fun() -> ty_arrow(arrow(S, U)) end, fun() -> ty_arrow(arrow(T, U)) end), 
+      true = is_empty(intersect(Left, negate(Right))),
+      true = is_empty(intersect(Right, negate(Left)))
+    end(),
+
+    ok
+  
+  end}.
 
 
 variable_test() ->

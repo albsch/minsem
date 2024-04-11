@@ -18,15 +18,15 @@ format(Txt, [R | Tys], M) ->
     
     NextTys = lists:uniq(Tys ++ TxtP ++ TxtP2),
 
-    NewTy = utils:beside([
+    NewTy = beside([
     prettypr:text(integer_to_list(erlang:phash2(R))),
     prettypr:break(prettypr:text(" := ")),
     prettypr:text("("),
-    utils:sep_by(prettypr:text(" |"), 
+    sep_by(prettypr:text(" |"), 
       [
-        utils:beside([prettypr:text("(flag & "), FlagStr, prettypr:text(")")]),
-        utils:beside([prettypr:text("({Any, Any} & "), ProductStr, prettypr:text(")")]),
-        utils:beside([prettypr:text("((Empty -> Any) & "), ArrowStr, prettypr:text(")")])
+        beside([prettypr:text("(flag & "), FlagStr, prettypr:text(")")]),
+        beside([prettypr:text("({Any, Any} & "), ProductStr, prettypr:text(")")]),
+        beside([prettypr:text("((Empty -> Any) & "), ArrowStr, prettypr:text(")")])
     ]),
     prettypr:text(")")
     ]),
@@ -35,9 +35,9 @@ format(Txt, [R | Tys], M) ->
 
 
 format_dnf_flag(Flag) -> 
-  utils:sep_by(prettypr:text(" |"),
+  sep_by(prettypr:text(" |"),
   [
-    utils:sep_by(prettypr:text(" &"), 
+    sep_by(prettypr:text(" &"), 
       [ prettypr:text("flag") || _ <- Pos] 
         ++
       [ prettypr:text("!flag") || _ <- Neg] 
@@ -48,9 +48,9 @@ format_dnf_product(Product, M) ->
   FormattedProductsAndNext = [ {[ format_product(P, M) || P <- Pos] , [ format_product(N, M) || N <- Neg]} || {Pos, Neg} <- Product],
   
   ProductsStr = 
-    utils:sep_by(prettypr:text(" |"),
+    sep_by(prettypr:text(" |"),
     [
-      utils:sep_by(prettypr:text(" &"), 
+      sep_by(prettypr:text(" &"), 
         [ P || {_, P} <- Pos] 
           ++
         [ prettypr:beside(prettypr:text("!"), N) || {_, N} <- Neg] 
@@ -65,9 +65,9 @@ format_dnf_arrow(Arrow, M) ->
   FormattedArrowsAndNext = [ {[ format_arrow(P, M) || P <- Pos] , [ format_arrow(N, M) || N <- Neg]} || {Pos, Neg} <- Arrow],
   
   ArrowsStr = 
-    utils:sep_by(prettypr:text(" |"),
+    sep_by(prettypr:text(" |"),
     [
-      utils:sep_by(prettypr:text(" &"), 
+      sep_by(prettypr:text(" &"), 
         [ P || {_, P} <- Pos] 
           ++
         [ prettypr:beside(prettypr:text("!"), N) || {_, N} <- Neg] 
@@ -79,7 +79,36 @@ format_dnf_arrow(Arrow, M) ->
   {lists:uniq(lists:flatten(Todo)), ArrowsStr}.
 
 format_product({Ref1, Ref2}, _) ->
-  {[Ref1, Ref2], utils:beside([prettypr:text("{"), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(","), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text("}")])}.
+  {[Ref1, Ref2], beside([prettypr:text("{"), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(","), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text("}")])}.
 
 format_arrow({arrow, Ref1, Ref2}, _) ->
-  {[Ref1, Ref2], utils:beside([prettypr:text("("), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(" -> "), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text(")")])}.
+  {[Ref1, Ref2], beside([prettypr:text("("), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(" -> "), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text(")")])}.
+
+compare(I, I) -> 0;
+compare(I1, I2) when I1 > I2 -> 1;
+compare(_, _) -> -1.
+
+pnegate(D) ->
+    beside([prettypr:text("not"), parens(D)]).
+
+parens(D) -> prettypr:beside(prettypr:text("("), prettypr:beside(D, prettypr:text(")"))).
+
+sep_by(_Sep, []) -> prettypr:text("");
+sep_by(_Sep, [D]) ->D;
+sep_by(Sep, Docs) ->
+    WithSep =
+        lists:foldr(
+          fun(D, Acc) ->
+                  case Acc of
+                      [] -> [D]; % last without trailing sep
+                      _ -> [beside([D, Sep]) | Acc]
+                  end
+          end,
+          [],
+          Docs),
+    Res = prettypr:sep(WithSep),
+    Res.
+
+beside([]) -> error(todo);
+beside([X]) -> X;
+beside([X | Rest]) -> prettypr:beside(X, beside(Rest)).
