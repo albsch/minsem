@@ -55,7 +55,7 @@ ty(Flag, Product, Arrow) -> #ty{flag = Flag, product = Product, arrow = Arrow}.
 % a single arrow type (s -> t) is never empty. 
 % The arrow which accepts any input and diverges (1 -> 0) is subset of any other arrow.
 % We do not yet want to introduce neutral elements for any and empty kinds, so we need to 
-% construct this "empty arrow part" ourselves with the appropriate line (arrow a intersected with its negation !a).
+% construct this "empty arrow part" ourselves with the appropriate line (any arrow A intersected with its negation !A).
 -spec ty_flag(dnf(flag())) -> ty_rec().
 ty_flag(Flag) -> #ty{flag = Flag, product = product(empty(), empty()), arrow = empty_arrow()}.
 
@@ -169,9 +169,7 @@ dnf([{Pos, Neg} | Cs], F = {Process, Combine}) ->
 
 -spec is_empty(ty_ref()) -> boolean().
 is_empty(Ty) -> 
-  R = corec_const(Ty, #{}, fun is_empty/2, true),
-  io:format(user,"Checking emptyness... ~p: ~p ~n", [erlang:phash2(Ty), R]),
-  R.
+  corec_const(Ty, #{}, fun is_empty/2, true).
 
 -spec is_empty(ty_ref(), memo()) -> boolean(); (ty_rec(), memo()) -> boolean().
 is_empty(Ty, Memo) when is_function(Ty) -> corec_const(Ty, Memo, fun is_empty/2, true);
@@ -193,9 +191,13 @@ is_empty_prod(Dnf, Memo) ->
     fun(R1, R2) -> R1 and R2 end
   }).
 
+% emptyness check for arrow lines
 -spec is_empty_arrow(dnf(arrow()), memo()) -> boolean().
 is_empty_arrow(Dnf, Memo) ->
   dnf(Dnf, {fun
+      % TODO explain why these two cases are necessary
+      % (_, []) -> false;
+      % ([], _) -> false;
       (Pos, Neg) -> 
         BigSTuple = lists:foldl(fun({arrow, S, _T}, Domain) -> union(S, Domain) end, empty(), Pos),
         is_empty_arrow_cont(BigSTuple, Pos, Neg, Memo)
@@ -204,14 +206,14 @@ is_empty_arrow(Dnf, Memo) ->
   }).
 
 is_empty_arrow_cont(_, _, [], _Memo) -> false;
-is_empty_arrow_cont(BigS, Pos, [{arrow, Ts, T2} | N], Memo) ->
+is_empty_arrow_cont(BigS, Pos, [{arrow, T1, T2} | N], Memo) ->
   (
-    %% ∃ Ts-->T2 ∈ N s.t.
-    %%    Ts is in the domain of the function
+    %% ∃ T1-->T2 ∈ N s.t.
+    %%    T1 is in the domain of the function
     %%    BigS is the union of all domains of the positive function intersections
-    is_empty(intersect(Ts, negate(BigS)), Memo)
+    is_empty(intersect(T1, negate(BigS)), Memo)
       and
-      phi_arrow(Ts, negate(T2), Pos, Memo)
+      phi_arrow(T1, T2, Pos, Memo)
   )
   %% Continue searching for another arrow ∈ N
     or
@@ -355,89 +357,10 @@ arrow_test() ->
 
   ok.
 
-
-
-format_dnf_flag(Flag) -> 
-  utils:sep_by(prettypr:text(" |"),
-  [
-    utils:sep_by(prettypr:text(" &"), 
-      [ prettypr:text("flag") || P <- Pos] 
-        ++
-      [ prettypr:text("!flag") || N <- Neg] 
-    )
-    || {Pos, Neg} <- Flag]
-).
-format_dnf_product(Product, M) -> 
-  FormattedProductsAndNext = [ {[ format_product(P, M) || P <- Pos] , [ format_product(N, M) || N <- Neg]} || {Pos, Neg} <- Product],
-  
-  ProductsStr = 
-    utils:sep_by(prettypr:text(" |"),
-    [
-      utils:sep_by(prettypr:text(" &"), 
-        [ P || {_, P} <- Pos] 
-          ++
-        [ prettypr:beside(prettypr:text("!"), N) || {_, N} <- Neg] 
-      )
-      || {Pos, Neg} <- FormattedProductsAndNext]
-  ),
-  Todo = [ [ T || {T, _} <- Pos] ++ [  T || {T, _} <- Neg] || {Pos, Neg} <- FormattedProductsAndNext],
-
-  {lists:uniq(lists:flatten(Todo)), ProductsStr}.
-
-format_dnf_arrow(Arrow, M) -> 
-  FormattedArrowsAndNext = [ {[ format_arrow(P, M) || P <- Pos] , [ format_arrow(N, M) || N <- Neg]} || {Pos, Neg} <- Arrow],
-  
-  ArrowsStr = 
-    utils:sep_by(prettypr:text(" |"),
-    [
-      utils:sep_by(prettypr:text(" &"), 
-        [ P || {_, P} <- Pos] 
-          ++
-        [ prettypr:beside(prettypr:text("!"), N) || {_, N} <- Neg] 
-      )
-      || {Pos, Neg} <- FormattedArrowsAndNext]
-  ),
-  Todo = [ [ T || {T, _} <- Pos] ++ [  T || {T, _} <- Neg] || {Pos, Neg} <- FormattedArrowsAndNext],
-
-  {lists:uniq(lists:flatten(Todo)), ArrowsStr}.
-
-format_product({Ref1, Ref2}, M) ->
-  {[Ref1, Ref2], utils:beside([prettypr:text("{"), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(","), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text("}")])}.
-
-format_arrow({arrow, Ref1, Ref2}, M) ->
-  {[Ref1, Ref2], utils:beside([prettypr:text("("), prettypr:text(integer_to_list(erlang:phash2(Ref1))), prettypr:text(" -> "), prettypr:text(integer_to_list(erlang:phash2(Ref2))), prettypr:text(")")])}.
-
 print(Ty) ->
-  Str = format([], [Ty], #{}),
+  Str = pretty:format([], [Ty], #{}),
   prettypr:format(Str, 200).
 
-format(Txt, [], M) -> 
-  lists:foldl(fun(E, Acc) -> prettypr:beside(prettypr:break(E), Acc) end, prettypr:empty(), (Txt));
-format(Txt, [R | Tys], M) ->
-  case M of
-    #{R := _} -> format(Txt, Tys, M);
-    _ -> 
-    #ty{flag = A, product = Product,arrow = Arrow} = R(),
-    FlagStr = format_dnf_flag(A),
-    {TxtP, ProductStr} = format_dnf_product(Product, M#{R => ok}),
-    {TxtP2, ArrowStr} = format_dnf_arrow(Arrow, M#{R => ok}),
-    
-    NextTys = lists:uniq(Tys ++ TxtP ++ TxtP2),
-
-    NewTy = utils:beside([
-    prettypr:text(integer_to_list(erlang:phash2(R))),
-    prettypr:break(prettypr:text(" := ")),
-    prettypr:text("("),
-    utils:sep_by(prettypr:text(" |"), 
-      [
-        utils:beside([prettypr:text("(flag & "), FlagStr, prettypr:text(")")]),
-        utils:beside([prettypr:text("({Any, Any} & "), ProductStr, prettypr:text(")")]),
-        utils:beside([prettypr:text("((Empty -> Any) & "), ArrowStr, prettypr:text(")")])
-    ]),
-    prettypr:text(")")
-    ]),
-    format([NewTy | Txt], NextTys, M#{R => ok})
-  end.
 
 
 variable_test() ->
