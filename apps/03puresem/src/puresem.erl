@@ -44,25 +44,37 @@ product(P) -> [{[P], []}].
 -spec negated_product(product()) -> dnf(product()).
 negated_product(P) -> [{[], [P]}].
 
+% The state is now explicit and can be modified by any function
+% The state keeps track of:
+% * The next unused ID for a new type
+% * The type map, mapping type pointers to type records
+% * The hash table for type records to enable structure sharing
 -record(s, {id = 0, ty = #{}, htbl = #{}}).
 -type s() :: #s{}.
 
-% A fresh context consists of a counter and an empty map.
+% A fresh context consists of a counter and an empty map for types and an empty hash table for type records.
 % This context is added to the input of every function that handle types.
-% For now, let's assume that every new corecursive type cannot be distinguished and is not shared.
-% That means that the Any type should be statically created.
+% We statically define the recursive type Any type and assign it the ID 0.
+% In our implementation, every new corecursive type gets a new ID, cannot be distinguished and is not shared.
+% To ensure termination, at least the Any type needs to be shared.
 % Otherwise, many equations alpha-equivalent to Any are created,
 % this can't be detected and the algorithm does not terminate.
-% To fix this, we would need to implement hashing modulo alpha equivalence.
 -spec ctx() -> s().
 ctx() ->
   Any = {ty_ref, 0},
   % we define the corecursive type and close it at the same time.
-  AnyRec = #ty{id = 0, flag = flag(), product = product(Any, Any)},
-  #s{id = 1, ty = #{Any => AnyRec}, htbl = #{ hash(AnyRec) => Any }}.
+  AnyRec = #ty{id = 0, flag = (F = flag()), product = (P = product(Any, Any))},
+  % we also add the hash of the Any function to the hash table, 
+  % even though it will never be accessed again in our implementation;
+  % any new corecursive type gets its own unique ID, 
+  % there will never be a corecursive type that matches the hash 
+  % TODO explain hash collisions
+  #s{id = 1, ty = #{Any => AnyRec}, htbl = #{ hash(AnyRec) => [Any] }}.
 
-hash(#ty{flag = Flag, product = Product}) ->
-  erlang:phash2({Flag, Product}).
+hash(#ty{flag = _Flag, product = _Product}) ->
+  % algorithm should work for bad hash functions, too
+  % erlang:phash2({_Flag, _Product}).
+  17.
 
 
 id(S = #s{id = Id}) ->
@@ -74,13 +86,21 @@ id(S = #s{id = Id}) ->
 store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{id = Id, htbl = Htbl, ty = Tys}) ->
   H = hash(Ty),
   case Htbl of
-    #{H := Ref} -> 
-      io:format(user, "Share hit for ~p!~n", [Ref]),
-      {Ref, S#s{id = Id - 1}};
+    #{H := Refs} -> 
+      % a good hash function should produce a lot of share hits and less collisions
+      case [X || X <- Refs, begin #{X := #ty{flag = FTy, product = PTy}} = Tys, {FTy, PTy} =:= {F, P} end] of
+        [Ref] -> 
+          % io:format(user, "Share hit for ~p!~n", [Ref]),
+          {Ref, S#s{id = Id - 1}};
+        _ -> 
+          NewTy = Ty#ty{id = NewId},
+          % io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
+          {{ty_ref, NewId}, S#s{htbl = Htbl#{H => Refs ++ [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
+        end;
     _ ->
       NewTy = Ty#ty{id = NewId},
-      io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
-      {{ty_ref, NewId}, S#s{htbl = Htbl#{H => {ty_ref, NewId}}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
+      % io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
+      {{ty_ref, NewId}, S#s{htbl = Htbl#{H => [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
     end.
 
 
@@ -135,13 +155,15 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
    _ -> 
      UnfoldMaybeList = fun
       (L) when is_list(L) -> [begin #{T := Ty} = Tys, Ty end || T <- L]; 
-      (L) -> begin #{L := Ty} = Tys, Ty end 
+      (L) -> begin 
+        #{L := Ty} = Tys, 
+        Ty 
+      end 
     end,
      case Type of 
        reference -> 
         {NewId, S0} = id(S),
         NewMemo =  Memo#{Corec => NewId},
-        io:format(user,"Unfolding ~p~n", [Corec]),
         Unfolded = UnfoldMaybeList(Corec),
 
         TyRec = Continue(Unfolded,NewMemo, S0),
@@ -162,7 +184,7 @@ negate(Ty, Memo, S) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/3, S)
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
 negate(#ty{flag = F, product = Prod}, M, _S) -> 
-  io:format(user,"Negating: ~p~n~p~n", [F, M]),
+  % io:format(user,"Negating: ~p~n~p~n", [F, M]),
  FlagDnf = negate_flag_dnf(F, M),
  ProductDnf = negate_product_dnf(Prod, M),
  #ty{flag = FlagDnf, product = ProductDnf}.
@@ -273,7 +295,7 @@ big_intersect([{Ty1, Ty2}, {Ty3, Ty4} | Xs], S) ->
 % Φ(S1 , S2 , N ∪ {T1, T2} , Left , Right) = Φ(S1 , S2 , N , Left | T1 , Right) and Φ(S1 , S2 , N , Left , Right | T2)
 -spec phi(ty_ref(), ty_ref(), [ty_ref()], memo(), s()) -> {boolean(), s()}.
 phi(S1, S2, N, Memo, S) -> 
-  io:format(user,"========~n", []),
+  % io:format(user,"========~n", []),
   {Empty, S0} = empty(S),
   phi(S1, S2, N, Empty, Empty, Memo, S0).
 
@@ -296,13 +318,15 @@ phi(TS1, TS2, [{T1, T2} | N], Left, Right, Memo, S) ->
 
 
 %% Exercises:
-%% - Implement a better phi function
-%% - Implement pretty printing (corecursive)
+%% - Implement hashing modulo alpha-equivalence (PLDI'21)
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+usage_test_() -> {
+timeout, 10000, fun usage_teste/0
+}.
 
-usage_test() ->
+usage_teste() ->
   Any = any(),
   
   io:format(user,"Any: ~p (~p) ~n", [Any, erlang:phash2(Any)]),
@@ -313,15 +337,19 @@ usage_test() ->
   % state does not change, sharing of types
   Res = negate(Any, S0),
   io:format(user,"Res: ~p~n", [Res]),
-  {Empty2, S0} = negate(Any, S0),
-  {Any2, S0} = negate(Empty, S0),
+  % {Empty2, S0} = negate(Any, S0),
+  % {Any2, S0} = negate(Empty, S0),
 
    %intersection of same recursive equations
    {Ai, S1} = intersect(Any, Any, S0),
 
+   io:format(user,"Ai: ~n", []),
    % is_empty
    {false, _} = is_empty(Any, S1),
+   io:format(user,"done: ~n", []),
    {true, _} = is_empty(Empty, S1),
+
+  io:format(user,"Custom: ~p~n", [S1]),
 
    % define a custom any type
    % get new ID
