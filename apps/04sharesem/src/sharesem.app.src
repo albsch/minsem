@@ -1,0 +1,8 @@
+{application, sharesem,
+ [{description, "Minimal  semantic subtyping library"},
+  {vsn, "v1"},
+  {applications,
+   [kernel,
+    stdlib
+   ]}
+ ]}.

@@ -1,4 +1,4 @@
--module(puresem).
+-module(sharesem).
 -compile(nowarn_export_all).
 -compile(export_all).
 
@@ -13,6 +13,7 @@
 % Now a type record has its own ID and needs to be closed/defined manually
 % The ID can be anything, it's usually a monotonically increasing counter
 -record(ty, {
+          id = open :: integer() | open, 
           flag      :: dnf(flag()), 
           product   :: dnf(product())
          }). 
@@ -47,18 +48,34 @@ negated_product(P) -> [{[], [P]}].
 % The state keeps track of:
 % * The next unused ID for a new type
 % * The type map, mapping type pointers to type records
--record(s, {id = 0, ty = #{}}).
+% * The hash table for type records to enable structure sharing
+-record(s, {id = 0, ty = #{}, htbl = #{}}).
 -type s() :: #s{}.
 
 % A fresh context consists of a counter and an empty map for types and an empty hash table for type records.
 % This context is added to the input of every function that handle types.
 % We statically define the recursive type Any type and assign it the ID 0.
+% In our implementation, every new corecursive type gets a new ID, cannot be distinguished and is not shared.
+% To ensure termination, at least the Any type needs to be shared.
+% Otherwise, many equations alpha-equivalent to Any are created,
+% this can't be detected and the algorithm does not terminate.
 -spec ctx() -> s().
 ctx() ->
   Any = {ty_ref, 0},
   % we define the corecursive type and close it at the same time.
-  AnyRec = #ty{flag = (flag()), product = (product(Any, Any))},
-  #s{id = 1, ty = #{Any => AnyRec}}.
+  AnyRec = #ty{id = 0, flag = (F = flag()), product = (P = product(Any, Any))},
+  % we also add the hash of the Any function to the hash table, 
+  % even though it will never be accessed again in our implementation;
+  % any new corecursive type gets its own unique ID, 
+  % there will never be a corecursive type that matches the hash 
+  % TODO explain hash collisions
+  #s{id = 1, ty = #{Any => AnyRec}, htbl = #{ hash(AnyRec) => [Any] }}.
+
+hash(#ty{flag = _Flag, product = _Product}) ->
+  % algorithm should work for bad hash functions, too
+  % erlang:phash2({_Flag, _Product}).
+  17.
+
 
 id(S = #s{id = Id}) ->
   {Id, S#s{id = Id + 1}}.
@@ -66,19 +83,24 @@ id(S = #s{id = Id}) ->
 % preconditions: 
 % id = open
 % id of product ty refs: defined (and therefore tracked in state)
-% In our implementation, every new corecursive type gets a new ID, cannot be distinguished and is not shared.
-% To ensure termination, at least the Any type needs to be shared.
-% Otherwise, many equations alpha-equivalent to Any are created,
-% this can't be detected and the algorithm does not terminate.
-% Furthermure, we need to check if we already stored syntactically equivalent types in type store already.
-% Otherwise, the algorithm again does not terminate.
-store(NewId, Ty = #ty{}, S = #s{id = Id, ty = Tys}) ->
-  case [{I, T} || {I, T} <- maps:to_list(Tys), T =:= Ty] of
-    [{OldRef, _}|_] -> 
-          {OldRef, S#s{id = Id - 1}};
+store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{id = Id, htbl = Htbl, ty = Tys}) ->
+  H = hash(Ty),
+  case Htbl of
+    #{H := Refs} -> 
+      % a good hash function should produce a lot of share hits and less collisions
+      case [X || X <- Refs, begin #{X := #ty{flag = FTy, product = PTy}} = Tys, {FTy, PTy} =:= {F, P} end] of
+        [Ref] -> 
+          % io:format(user, "Share hit for ~p!~n", [Ref]),
+          {Ref, S#s{id = Id - 1}};
+        _ -> 
+          NewTy = Ty#ty{id = NewId},
+          % io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
+          {{ty_ref, NewId}, S#s{htbl = Htbl#{H => Refs ++ [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
+        end;
     _ ->
-      NewTy = Ty,
-      {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => NewTy }}}
+      NewTy = Ty#ty{id = NewId},
+      % io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
+      {{ty_ref, NewId}, S#s{htbl = Htbl#{H => [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
     end.
 
 
@@ -197,6 +219,7 @@ dnf([{Pos, Neg} | Cs], F = {Process, Combine}, S) ->
 % lists:uniq is very important here
 % equations which differ produce a new type which is not memoized, yet equivalent to a previously memoized type
 % e.g. (Any, Any) & (Any, Any) should be represented as (Any, Any)
+% Erlang is then able to hash two closures to the same value
 -spec union_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
 union_dnf(A, B) -> lists:uniq(A ++ B). 
 -spec intersect_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
