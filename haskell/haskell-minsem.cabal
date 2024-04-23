@@ -1,0 +1,38 @@
+cabal-version:      3.0
+name:               haskell-minsem
+version:            0.1.0.0
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Stefan Wehr
+maintainer:         stefan.wehr@hs-offenburg.de
+category:           Language
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Werror -W -fwarn-unused-imports -fwarn-unused-binds -fwarn-orphans
+       -fwarn-unused-matches -fwarn-unused-do-bind -fwarn-wrong-do-bind
+       -fwarn-missing-signatures -fno-warn-partial-type-signatures
+       -Wredundant-constraints -fwarn-incomplete-patterns
+
+library
+    import:           warnings
+    exposed-modules:  Minsem
+    other-modules:    Utils
+    build-depends:
+        base ^>=4.16.4.0,
+        hashable,
+        mtl,
+        unordered-containers
+    hs-source-dirs:   src
+    default-language: GHC2021
+
+test-suite haskell-minsem-test
+    import:           warnings
+    default-language: GHC2021
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    build-depends:
+        base ^>=4.16.4.0,
+        haskell-minsem
