@@ -1,4 +1,9 @@
-module Minsem where
+module Minsem (
+    T,
+    runT,
+    Ty,
+    impl
+) where
 
 import GHC.Generics
 import qualified Data.HashMap.Strict as HashMap
@@ -9,18 +14,17 @@ import qualified Data.Foldable as F
 import Utils
 import Control.Monad
 import qualified Data.List as L
+import qualified Iface as I
 
-data Flag = FlagTrue
-    deriving (Eq, Generic)
-
-instance Hashable Flag
+newtype Atom = Atom Bool
+    deriving (Eq, Hashable)
 
 data Prod = Prod { p_left :: Ty, p_right :: Ty }
     deriving (Eq, Generic)
 
 instance Hashable Prod
 
-newtype TyRef = TyRef { unTyRef :: Int }
+newtype TyRef = TyRef { _unTyRef :: Int }
     deriving (Eq, Hashable)
 
 data Ty =
@@ -30,7 +34,7 @@ data Ty =
 
 instance Hashable Ty
 
-data TyRec = TyRec { tr_flag :: Dnf Flag, tr_prod :: Dnf Prod }
+data TyRec = TyRec { tr_atom :: Dnf Atom, tr_prod :: Dnf Prod }
     deriving (Eq, Generic)
 
 instance Hashable TyRec
@@ -47,11 +51,14 @@ data Conj a = Conj { c_pos :: [a], c_neg :: [a] }
 
 instance Hashable a => Hashable (Conj a)
 
-flag :: Dnf Flag
-flag = Dnf [Conj [FlagTrue] []]
+atom :: Atom -> Dnf Atom
+atom a = Dnf [Conj [a] []]
 
-negatedFlag :: Dnf Flag
-negatedFlag = Dnf [Conj [] [FlagTrue]]
+negatedAtom :: Atom -> Dnf Atom
+negatedAtom a = Dnf [Conj [] [a]]
+
+anyAtom :: Dnf Atom
+anyAtom = Dnf [Conj [Atom True] [], Conj [Atom False] []]
 
 prod :: Prod -> Dnf Prod
 prod p = Dnf [Conj [p] []]
@@ -62,11 +69,20 @@ prod' a b = prod (Prod a b)
 negatedProd :: Prod -> Dnf Prod
 negatedProd p = Dnf [Conj [] [p]]
 
+tyAtom :: Bool -> Ty
+tyAtom b = IsTyRec (TyRec (atom (Atom b)) (Dnf []))
+
+tyProd :: Ty -> Ty -> Ty
+tyProd t1 t2 = IsTyRec (TyRec (Dnf []) (prod' t1 t2))
+
 type TyMap = HashMap TyRef TyRec
 data TyState = TyState { s_nextTyRef :: !Int, s_tyMap :: !TyMap }
 
 newtype T a = T { unT :: S.State TyState a }
     deriving (Functor, Applicative, Monad, S.MonadState TyState)
+
+runT :: T a -> a
+runT (T x) = S.evalState x initTyState
 
 freshTyRef :: T TyRef
 freshTyRef = do
@@ -81,7 +97,7 @@ tyAny = IsTyRef (TyRef 0)
 initTyState :: TyState
 initTyState = TyState 1 initTyMap
   where
-    anyRec = TyRec flag (prod' tyAny tyAny)
+    anyRec = TyRec anyAtom (prod' tyAny tyAny)
     initTyMap = HashMap.fromList [(TyRef 0, anyRec)]
 
 store :: TyRef -> TyRec -> T TyRef
@@ -99,30 +115,30 @@ store tyRef tyRec = do
                     S.put $! state { s_tyMap = HashMap.insert tyRef tyRec tyMap }
                     pure tyRef
 
-mkTyEmpty :: T Ty
-mkTyEmpty = neg tyAny
+tyEmpty :: T Ty
+tyEmpty = tyNeg tyAny
 
-neg :: Ty -> T Ty
-neg (IsTyRec r) = do
+tyNeg :: Ty -> T Ty
+tyNeg (IsTyRec r) = do
     r' <- negTyRec r
     pure (IsTyRec r')
-neg (IsTyRef r) = do
+tyNeg (IsTyRef r) = do
     ref <- corecRef r HashMap.empty (\r _ -> negTyRec r)
     pure (IsTyRef ref)
 
 negTyRec :: TyRec -> T TyRec
 negTyRec (TyRec f t) = do
-    f' <- negFlag f
+    f' <- negAtom f
     t' <- negProd t
     pure $ TyRec f' t'
   where
-    negFlag :: Dnf Flag -> T (Dnf Flag)
-    negFlag f = dnf f processFlag intersectDnf
-    processFlag :: Conj Flag -> T (Dnf Flag)
-    processFlag conj =
+    negAtom :: Dnf Atom -> T (Dnf Atom)
+    negAtom f = dnf f processAtom intersectDnf
+    processAtom :: Conj Atom -> T (Dnf Atom)
+    processAtom conj =
         let (x:xs) =
-                replicate (length (c_pos conj)) negatedFlag ++
-                replicate (length (c_neg conj)) flag
+                [negatedAtom t | t <- c_pos conj] ++
+                [atom t | t <- c_neg conj]
         in pure (F.foldl' unionDnf x xs)
     negProd :: Dnf Prod -> T (Dnf Prod)
     negProd p = dnf p processProd intersectDnf
@@ -189,13 +205,13 @@ isEmpty' (IsTyRec r) memo = tyRecIsEmpty r memo
 isEmpty' (IsTyRef r) memo = corecConst r memo tyRecIsEmpty True
 
 tyRecIsEmpty :: TyRec -> Memo Bool -> T Bool
-tyRecIsEmpty (TyRec flags prods) memo = do
-    b1 <- isEmptyFlags flags
+tyRecIsEmpty (TyRec atoms prods) memo = do
+    b1 <- isEmptyAtoms atoms
     b2 <- isEmptyProds prods memo
     pure (b1 && b2)
     where
-        isEmptyFlags :: Dnf Flag -> T Bool
-        isEmptyFlags d = dnf d (\(Conj _ neg) -> pure (not (null neg))) (&&)
+        isEmptyAtoms :: Dnf Atom -> T Bool
+        isEmptyAtoms d = dnf d (\(Conj _ neg) -> pure (not (null neg))) (&&)
         isEmptyProds :: Dnf Prod -> Memo Bool -> T Bool
         isEmptyProds d memo = dnf d (processProd memo) (&&)
         processProd :: Memo Bool -> Conj Prod -> T Bool
@@ -203,8 +219,8 @@ tyRecIsEmpty (TyRec flags prods) memo = do
             p <- bigIntersect pos
             phi p neg memo
 
-intersect :: Ty -> Ty -> T Ty
-intersect t1 t2 = do
+tyIntersect :: Ty -> Ty -> T Ty
+tyIntersect t1 t2 = do
     rec1 <- resolveTy t1
     rec2 <- resolveTy t2
     pure (IsTyRec (intersectTyRec rec1 rec2))
@@ -213,8 +229,8 @@ intersectTyRec :: TyRec -> TyRec -> TyRec
 intersectTyRec (TyRec f1 p1) (TyRec f2 p2) =
     TyRec (intersectDnf f1 f2) (intersectDnf p1 p2)
 
-union :: Ty -> Ty -> T Ty
-union t1 t2 = do
+tyUnion :: Ty -> Ty -> T Ty
+tyUnion t1 t2 = do
     rec1 <- resolveTy t1
     rec2 <- resolveTy t2
     pure (IsTyRec (unionTyRec rec1 rec2))
@@ -228,30 +244,40 @@ bigIntersect :: [Prod] -> T Prod
 bigIntersect [] = pure (Prod tyAny tyAny)
 bigIntersect [prod] = pure prod
 bigIntersect (Prod t1 t2 : Prod t3 t4 : rest) = do
-    tl <- intersect t1 t3
-    tr <- intersect t2 t4
+    tl <- tyIntersect t1 t3
+    tr <- tyIntersect t2 t4
     bigIntersect (Prod tl tr : rest)
 
 phi :: Prod -> [Prod] -> Memo Bool -> T Bool
 phi p neg memo = do
-    tyEmpty <- mkTyEmpty
+    tyEmpty <- tyEmpty
     phi' p neg tyEmpty tyEmpty memo
 
 phi' :: Prod -> [Prod] -> Ty -> Ty -> Memo Bool -> T Bool
 phi' (Prod ts1 ts2) [] t1 t2 memo = do
-    n1 <- neg t1
-    l <- intersect ts1 n1
+    n1 <- tyNeg t1
+    l <- tyIntersect ts1 n1
     res1 <- isEmpty' l memo
-    n2 <- neg t2
-    r <- intersect ts2 n2
+    n2 <- tyNeg t2
+    r <- tyIntersect ts2 n2
     res2 <- isEmpty' r memo
     pure (res1 || res2)
 phi' prod (Prod t1 t2 : rest) left right memo = do
-    tl <- union left t1
+    tl <- tyUnion left t1
     res1 <- phi' prod rest tl right memo
-    tr <- union right t2
+    tr <- tyUnion right t2
     res2 <- phi' prod rest left tr memo
     pure (res1 && res2)
 
-someFunc :: IO ()
-someFunc = putStrLn "someFunc"
+impl :: I.SemIface Ty T
+impl =
+    I.SemIface {
+        I.tyAny = pure tyAny,
+        I.tyEmpty = tyEmpty,
+        I.tyAtom = \b -> pure (tyAtom b),
+        I.tyProd = \t1 t2 -> pure (tyProd t1 t2),
+        I.tyUnion = tyUnion,
+        I.tyIntersect = tyIntersect,
+        I.tyNeg = tyNeg,
+        I.isEmpty = isEmpty
+    }
