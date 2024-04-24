@@ -23,6 +23,8 @@ library
         base ^>=4.16.4.0,
         hashable,
         mtl,
+        QuickCheck,
+        text,
         unordered-containers
     hs-source-dirs:   src
     default-language: GHC2021
