@@ -23,6 +23,7 @@ executable Minsem
         Iface,
         Minsem,
         Pretty,
+        Trace,
         Ty,
         Utils
     build-depends:
@@ -32,6 +33,7 @@ executable Minsem
         prettyprinter,
         QuickCheck,
         text,
+        time,
         unordered-containers
     hs-source-dirs:   src
     default-language: GHC2021

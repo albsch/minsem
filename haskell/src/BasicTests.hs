@@ -7,6 +7,7 @@ import Pretty
 import Control.Monad
 import System.Timeout
 import Control.Exception (evaluate)
+import Utils
 
 assertTrue :: Bool -> IO ()
 assertTrue True = pure ()
@@ -26,11 +27,13 @@ assertSubTy :: (Pretty t, Pretty s, Monad m) => SemIface t s m -> Ty -> Ty -> Bo
 assertSubTy impl t1 t2 b = do
     putStrLn ("Checking " ++ show t1 ++ " <= " ++ show t2 ++
               " (expected " ++ show b ++ ")")
-    x <- timeout subTyTimeout $ evaluate (run impl (isSubTy impl t1 t2))
+    x <- timeout subTyTimeout $ timeIt $ evaluate (run impl (isSubTy impl t1 t2))
     case x of
         Nothing ->
             fail ("Subtype checked timed out.")
-        Just ((res, t), s) ->
+        Just (((res, t), s), delta) -> do
+            putStrLn ("Result for " ++ show t1 ++ " <= " ++ show t2 ++ ": " ++ show res ++
+                ", " ++ show delta)
             when (b /= res) $
                 fail ("Expected " ++ show b ++ " got " ++ show res ++ "\nInternal type: " ++
                       showPretty t ++ "\n" ++ show (indent 2 (pretty s)))
