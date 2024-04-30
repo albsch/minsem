@@ -1,5 +1,7 @@
+{-# OPTIONS_GHC -Wwarn #-}
 module Minsem (
     T,
+    TyState,
     runT,
     Ty,
     impl
@@ -15,41 +17,71 @@ import Utils
 import Control.Monad
 import qualified Data.List as L
 import qualified Iface as I
+import Pretty
+import Debug.Trace
 
 newtype Atom = Atom Bool
-    deriving (Eq, Hashable)
+    deriving (Show, Eq, Hashable, Enum, Bounded)
+
+instance Pretty Atom where
+    pretty (Atom True) = pretty "T"
+    pretty (Atom False) = pretty "F"
 
 data Prod = Prod { p_left :: Ty, p_right :: Ty }
-    deriving (Eq, Generic)
+    deriving (Show, Eq, Generic)
 
 instance Hashable Prod
 
+instance Pretty Prod where
+    pretty (Prod l r) =
+        parens (pretty l <> comma <+> pretty r)
+
 newtype TyRef = TyRef { _unTyRef :: Int }
-    deriving (Eq, Hashable)
+    deriving (Show, Eq, Hashable, Ord)
+
+instance Pretty TyRef where
+    pretty (TyRef i) = pretty i
 
 data Ty =
     IsTyRef TyRef
     | IsTyRec TyRec
-    deriving (Eq, Generic)
+    deriving (Show, Eq, Generic)
 
 instance Hashable Ty
 
+instance Pretty Ty where
+    pretty (IsTyRef r) = pretty r
+    pretty (IsTyRec r) = pretty r
+
 data TyRec = TyRec { tr_atom :: Dnf Atom, tr_prod :: Dnf Prod }
-    deriving (Eq, Generic)
+    deriving (Show, Eq, Generic)
 
 instance Hashable TyRec
+
+instance Pretty TyRec where
+    pretty (TyRec a p) =
+        braces (pretty "atom=" <> (pretty a) <> pretty ", prod=" <> pretty p)
 
 -- Dnf (disjunctive normale form) is the disjunction of a list of
 -- Conj values. Conj is a conjunction of positive and negative literals.
 -- An empty disjunction is equivalent to false.
 -- An empty conjunction is equivalent to true.
 newtype Dnf a = Dnf [Conj a]
-    deriving (Eq, Hashable)
+    deriving (Show, Eq, Hashable)
+
+instance Pretty a => Pretty (Dnf a) where
+    pretty (Dnf []) = pretty "∨"
+    pretty (Dnf conjs) = hcat $ punctuate (pretty " ∨ ") (map pretty conjs)
 
 data Conj a = Conj { c_pos :: [a], c_neg :: [a] }
-    deriving (Eq, Generic)
+    deriving (Show, Eq, Generic)
 
 instance Hashable a => Hashable (Conj a)
+
+instance Pretty a => Pretty (Conj a) where
+    pretty (Conj p n) =
+        hcat $ punctuate (pretty " ∧ ") $
+          map pretty p ++ map (\x -> pretty "¬" <> pretty x) n
 
 atom :: Atom -> Dnf Atom
 atom a = Dnf [Conj [a] []]
@@ -75,14 +107,25 @@ tyAtom b = IsTyRec (TyRec (atom (Atom b)) (Dnf []))
 tyProd :: Ty -> Ty -> Ty
 tyProd t1 t2 = IsTyRec (TyRec (Dnf []) (prod' t1 t2))
 
-type TyMap = HashMap TyRef TyRec
-data TyState = TyState { s_nextTyRef :: !Int, s_tyMap :: !TyMap }
+newtype TyMap = TyMap { unTyMap :: HashMap TyRef TyRec }
+    deriving (Show)
 
-newtype T a = T { unT :: S.State TyState a }
+instance Pretty TyMap where
+    pretty (TyMap m) =
+        let l = L.sortOn fst (HashMap.toList m)
+        in vcat $ map (\(k, v) -> pretty k <+> pretty "➔" <+> pretty v) l
+
+data TyState = TyState { s_nextTyRef :: !Int, s_tyMap :: !TyMap }
+    deriving (Show)
+
+instance Pretty TyState where
+    pretty (TyState _ m) = pretty m
+
+newtype T a = T { _unT :: S.State TyState a }
     deriving (Functor, Applicative, Monad, S.MonadState TyState)
 
-runT :: T a -> a
-runT (T x) = S.evalState x initTyState
+runT :: T a -> (a, TyState)
+runT (T x) = S.runState x initTyState
 
 freshTyRef :: T TyRef
 freshTyRef = do
@@ -98,21 +141,21 @@ initTyState :: TyState
 initTyState = TyState 1 initTyMap
   where
     anyRec = TyRec anyAtom (prod' tyAny tyAny)
-    initTyMap = HashMap.fromList [(TyRef 0, anyRec)]
+    initTyMap = TyMap (HashMap.fromList [(TyRef 0, anyRec)])
 
 store :: TyRef -> TyRec -> T TyRef
 store tyRef tyRec = do
     -- FIXME: not efficient: to check for structural equality with an existing type, we
     -- look at all types in the type state.
     state <- S.get
-    let tyMap = s_tyMap state
+    let TyMap tyMap = s_tyMap state
     case L.lookup tyRec (map (\(x, y) -> (y, x)) (HashMap.toList tyMap)) of
         Just existingRef -> pure existingRef
         Nothing ->
             case HashMap.lookup tyRef tyMap of
                 Just _ -> error ("Tried to store already stored TyRef")
                 Nothing -> do
-                    S.put $! state { s_tyMap = HashMap.insert tyRef tyRec tyMap }
+                    S.put $! state { s_tyMap = TyMap (HashMap.insert tyRef tyRec tyMap) }
                     pure tyRef
 
 tyEmpty :: T Ty
@@ -169,7 +212,7 @@ type Memo v = HashMap TyRef v
 resolveTyRef :: TyRef -> T TyRec
 resolveTyRef tyRef = do
     state <- S.get
-    case HashMap.lookup tyRef (s_tyMap state) of
+    case HashMap.lookup tyRef (unTyMap (s_tyMap state)) of
         Just t -> pure t
         Nothing -> error "unknown TyRef"
 
@@ -178,7 +221,7 @@ resolveTy (IsTyRec r) = pure r
 resolveTy (IsTyRef r) = resolveTyRef r
 
 corecRef :: TyRef -> Memo TyRef -> (TyRec -> Memo TyRef  -> T TyRec) -> T TyRef
-corecRef ref memo f =
+corecRef ref memo f = trace "corecRef" $
     case HashMap.lookup ref memo of
         Just v -> pure v
         Nothing -> do
@@ -189,23 +232,25 @@ corecRef ref memo f =
             store tyRef tyRec -- ?? might return a TyRef different from tyRef
 
 corecConst :: TyRef -> Memo c -> (TyRec -> Memo c -> T c) -> c -> T c
-corecConst ref memo f val =
+corecConst ref memo f val = trace ("corecConst, ref=" ++ show ref) $
     case HashMap.lookup ref memo of
-        Just v -> pure v
+        Just v -> trace ("memo good") $ pure v
         Nothing -> do
             ty <- resolveTyRef ref
             let newMemo = HashMap.insert ref val memo
             f ty newMemo
 
 isEmpty :: Ty -> T Bool
-isEmpty ty = isEmpty' ty HashMap.empty
+isEmpty ty = trace "isEmpty" $ isEmpty' ty HashMap.empty
 
 isEmpty' :: Ty -> Memo Bool -> T Bool
-isEmpty' (IsTyRec r) memo = tyRecIsEmpty r memo
-isEmpty' (IsTyRef r) memo = corecConst r memo tyRecIsEmpty True
+isEmpty' t memo = trace "isEmpty'" $
+    case t of
+        IsTyRec r -> tyRecIsEmpty r memo
+        IsTyRef r -> corecConst r memo tyRecIsEmpty True
 
 tyRecIsEmpty :: TyRec -> Memo Bool -> T Bool
-tyRecIsEmpty (TyRec atoms prods) memo = do
+tyRecIsEmpty t@(TyRec atoms prods) memo = trace ("tyRecIsEmpty " ++ show t) $ do
     b1 <- isEmptyAtoms atoms
     b2 <- isEmptyProds prods memo
     pure (b1 && b2)
@@ -250,8 +295,8 @@ bigIntersect (Prod t1 t2 : Prod t3 t4 : rest) = do
 
 phi :: Prod -> [Prod] -> Memo Bool -> T Bool
 phi p neg memo = do
-    tyEmpty <- tyEmpty
-    phi' p neg tyEmpty tyEmpty memo
+    e <- tyEmpty
+    phi' p neg e e memo
 
 phi' :: Prod -> [Prod] -> Ty -> Ty -> Memo Bool -> T Bool
 phi' (Prod ts1 ts2) [] t1 t2 memo = do
@@ -269,7 +314,7 @@ phi' prod (Prod t1 t2 : rest) left right memo = do
     res2 <- phi' prod rest left tr memo
     pure (res1 && res2)
 
-impl :: I.SemIface Ty T
+impl :: I.SemIface Ty TyState T
 impl =
     I.SemIface {
         I.tyAny = pure tyAny,
@@ -279,5 +324,6 @@ impl =
         I.tyUnion = tyUnion,
         I.tyIntersect = tyIntersect,
         I.tyNeg = tyNeg,
-        I.isEmpty = isEmpty
+        I.isEmpty = isEmpty,
+        I.run = runT
     }

@@ -1,5 +1,6 @@
 module Utils (
-    nubHash
+    nubHash,
+    noTrace
 ) where
 
 import Data.Hashable
@@ -8,8 +9,11 @@ import qualified Data.HashSet as HashSet
 nubHash :: Hashable a => [a] -> [a]
 nubHash = go HashSet.empty []
   where
-    go s acc [] = reverse acc
+    go _ acc [] = reverse acc
     go s acc (x:xs) =
         if x `HashSet.member` s
             then go s acc xs
-            else go s (x:acc) xs
+            else go (HashSet.insert x s) (x:acc) xs
+
+noTrace :: String -> a -> a
+noTrace _ x = x
