@@ -15,26 +15,24 @@ common warnings
        -fwarn-missing-signatures -fno-warn-partial-type-signatures
        -Wredundant-constraints -fwarn-incomplete-patterns
 
-library
+executable Minsem
     import:           warnings
-    exposed-modules:  Minsem
-    other-modules:    Utils
+    main-is:          Main.hs
+    other-modules:
+        BasicTests,
+        Iface,
+        Minsem,
+        Pretty,
+        Ty,
+        Utils
     build-depends:
         base ^>=4.16.4.0,
         hashable,
         mtl,
+        prettyprinter,
         QuickCheck,
         text,
         unordered-containers
     hs-source-dirs:   src
     default-language: GHC2021
 
-test-suite haskell-minsem-test
-    import:           warnings
-    default-language: GHC2021
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   test
-    main-is:          Main.hs
-    build-depends:
-        base ^>=4.16.4.0,
-        haskell-minsem
