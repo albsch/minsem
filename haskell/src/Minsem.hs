@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wwarn #-}
 module Minsem (
     T,
@@ -18,7 +19,7 @@ import Control.Monad
 import qualified Data.List as L
 import qualified Iface as I
 import Pretty
-import Debug.Trace
+import Trace
 
 newtype Atom = Atom Bool
     deriving (Show, Eq, Hashable, Enum, Bounded)
@@ -216,10 +217,6 @@ resolveTyRef tyRef = do
         Just t -> pure t
         Nothing -> error "unknown TyRef"
 
-resolveTy :: Ty -> T TyRec
-resolveTy (IsTyRec r) = pure r
-resolveTy (IsTyRef r) = resolveTyRef r
-
 corecRef :: TyRef -> Memo TyRef -> (TyRec -> Memo TyRef  -> T TyRec) -> T TyRef
 corecRef ref memo f = trace "corecRef" $
     case HashMap.lookup ref memo of
@@ -231,8 +228,36 @@ corecRef ref memo f = trace "corecRef" $
             tyRec <- f ty newMemo
             store tyRef tyRec -- ?? might return a TyRef different from tyRef
 
+class Hashable r => Resolvable r where
+    type Resolved r
+    resolve :: r -> T (Resolved r)
+
+instance Resolvable TyRef where
+    type Resolved TyRef = TyRec
+    resolve = resolveTyRef
+
+instance (Resolvable r1, Resolvable r2) => Resolvable (r1, r2) where
+    type Resolved (r1, r2) = (Resolved r1, Resolved r2)
+    resolve (r1, r2) = do
+        x1 <- resolve r1
+        x2 <- resolve r2
+        pure (x1, x2)
+
+type Memo' r v = HashMap r v
+
+corecRef' :: Resolvable r => r -> Memo' r TyRef -> (Resolved r -> Memo' r TyRef  -> T TyRec) -> T TyRef
+corecRef' ref memo f = trace "corecRef'" $
+    case HashMap.lookup ref memo of
+        Just v -> pure v
+        Nothing -> do
+            tyRef <- freshTyRef
+            let newMemo = HashMap.insert ref tyRef memo
+            ty <- resolve ref
+            tyRec <- f ty newMemo
+            store tyRef tyRec -- ?? might return a TyRef different from tyRef
+
 corecConst :: TyRef -> Memo c -> (TyRec -> Memo c -> T c) -> c -> T c
-corecConst ref memo f val = trace ("corecConst, ref=" ++ show ref) $
+corecConst ref memo f val = trace ("corecConst, ref=" ++ showPretty ref) $
     case HashMap.lookup ref memo of
         Just v -> trace ("memo good") $ pure v
         Nothing -> do
@@ -244,13 +269,13 @@ isEmpty :: Ty -> T Bool
 isEmpty ty = trace "isEmpty" $ isEmpty' ty HashMap.empty
 
 isEmpty' :: Ty -> Memo Bool -> T Bool
-isEmpty' t memo = trace "isEmpty'" $
+isEmpty' t memo = trace ("isEmpty' " ++ showPretty t ++ ", memo: " ++ show memo) $
     case t of
         IsTyRec r -> tyRecIsEmpty r memo
         IsTyRef r -> corecConst r memo tyRecIsEmpty True
 
 tyRecIsEmpty :: TyRec -> Memo Bool -> T Bool
-tyRecIsEmpty t@(TyRec atoms prods) memo = trace ("tyRecIsEmpty " ++ show t) $ do
+tyRecIsEmpty t@(TyRec atoms prods) memo = trace ("tyRecIsEmpty " ++ showPretty t) $ do
     b1 <- isEmptyAtoms atoms
     b2 <- isEmptyProds prods memo
     pure (b1 && b2)
@@ -264,25 +289,34 @@ tyRecIsEmpty t@(TyRec atoms prods) memo = trace ("tyRecIsEmpty " ++ show t) $ do
             p <- bigIntersect pos
             phi p neg memo
 
-tyIntersect :: Ty -> Ty -> T Ty
-tyIntersect t1 t2 = do
-    rec1 <- resolveTy t1
-    rec2 <- resolveTy t2
-    pure (IsTyRec (intersectTyRec rec1 rec2))
+corecBinOp :: (TyRec -> TyRec -> TyRec) -> Ty -> Ty -> T Ty
+corecBinOp f (IsTyRec rec1) (IsTyRec rec2) = do
+    pure (IsTyRec (f rec1 rec2))
+corecBinOp f t1 t2 = do
+    ref1 <- mkRef t1
+    ref2 <- mkRef t2
+    resRef <- corecRef' (ref1, ref2) HashMap.empty $
+        \(rec1, rec2) _ -> pure (f rec1 rec2)
+    pure (IsTyRef resRef)
+    where
+        mkRef (IsTyRef r) = pure r
+        mkRef (IsTyRec r) = do
+            ref <- freshTyRef
+            store ref r
 
-intersectTyRec :: TyRec -> TyRec -> TyRec
-intersectTyRec (TyRec f1 p1) (TyRec f2 p2) =
-    TyRec (intersectDnf f1 f2) (intersectDnf p1 p2)
+tyIntersect :: Ty -> Ty -> T Ty
+tyIntersect = corecBinOp intersectTyRec
+    where
+        intersectTyRec :: TyRec -> TyRec -> TyRec
+        intersectTyRec (TyRec f1 p1) (TyRec f2 p2) =
+            TyRec (intersectDnf f1 f2) (intersectDnf p1 p2)
 
 tyUnion :: Ty -> Ty -> T Ty
-tyUnion t1 t2 = do
-    rec1 <- resolveTy t1
-    rec2 <- resolveTy t2
-    pure (IsTyRec (unionTyRec rec1 rec2))
-
-unionTyRec :: TyRec -> TyRec -> TyRec
-unionTyRec (TyRec f1 p1) (TyRec f2 p2) =
-    TyRec (unionDnf f1 f2) (unionDnf p1 p2)
+tyUnion = corecBinOp unionTyRec
+    where
+        unionTyRec :: TyRec -> TyRec -> TyRec
+        unionTyRec (TyRec f1 p1) (TyRec f2 p2) =
+            TyRec (unionDnf f1 f2) (unionDnf p1 p2)
 
 
 bigIntersect :: [Prod] -> T Prod

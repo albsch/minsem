@@ -1,10 +1,11 @@
 module Utils (
     nubHash,
-    noTrace
+    timeIt
 ) where
 
 import Data.Hashable
 import qualified Data.HashSet as HashSet
+import Data.Time
 
 nubHash :: Hashable a => [a] -> [a]
 nubHash = go HashSet.empty []
@@ -15,5 +16,9 @@ nubHash = go HashSet.empty []
             then go s acc xs
             else go (HashSet.insert x s) (x:acc) xs
 
-noTrace :: String -> a -> a
-noTrace _ x = x
+timeIt :: IO a -> IO (a, NominalDiffTime)
+timeIt action = do
+  start <- getCurrentTime
+  x <- action
+  end <- getCurrentTime
+  pure (x, end `diffUTCTime` start)
