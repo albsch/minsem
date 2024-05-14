@@ -14,6 +14,7 @@ import System.Timeout
 import Control.Exception
 import qualified Minsem as M
 import Utils
+import Control.Monad
 
 isEmptyTimeout :: Int
 isEmptyTimeout = 2 * 1000 * 1000 -- in microseconds
@@ -25,14 +26,15 @@ isEmpty impl ty = do
     pure (b, t)
 
 checkCduceTestCase ::
-    (Pretty t, Pretty s, Monad m) => SemIface t s m -> (Int, (Ty, Bool)) -> IO ()
+    (Pretty t, Pretty s, Monad m) => SemIface t s m -> (Int, (Ty, Bool)) -> IO (Maybe String)
 checkCduceTestCase impl (idx, (ty, cduceRes)) = do
     putStrLn ("Running cduce test " ++ show idx ++ " (" ++ show cduceRes ++ "): "
                 ++ showPretty ty)
     x <- timeout isEmptyTimeout $ timeIt $ evaluate (I.run impl (isEmpty impl ty))
     case x of
-        Nothing ->
-            assertFailure ("Subtype checked timed out.")
+        Nothing -> do
+            let msg = "Timeout in cduce check " ++ show idx ++ ": " ++ showPretty ty
+            pure $ Just msg
         Just (((myRes, t), s), delta) -> do
             let msg =
                     "Type: " ++ showPretty ty ++ "\n" ++
@@ -44,7 +46,8 @@ checkCduceTestCase impl (idx, (ty, cduceRes)) = do
                 then putStrLn ("Cduce test " ++ show idx ++ " OK (" ++ show delta ++ ")")
                 else do
                     putStrLn msg
-                    fail "mismatch"
+                    assertFailure "test failed"
+            pure Nothing
 
 readTestCases :: FilePath -> IO [(Ty, Bool)]
 readTestCases path = do
@@ -56,5 +59,17 @@ readTestCases path = do
 
 test_cduce :: IO ()
 test_cduce = do
-    testCases <- readTestCases "cduce_test_cases.txt"
-    mapM_ (checkCduceTestCase M.impl) (zip [1..] testCases)
+    let path = "cduce_test_cases.txt"
+    testCases <- readTestCases path
+    let total = length testCases
+    putStrLn ("Found " ++ show total ++ " test cases in " ++ path)
+    timeouts <- reverse <$> foldM runTest [] (zip [1..] testCases)
+    let n = length timeouts
+    when (n > 0) $ do
+        putStrLn (show n ++ " test cases timed out!")
+        forM_ timeouts $ \s -> putStrLn ("- " ++ s)
+        assertFailure "timeouts"
+    where
+        runTest timeouts testCase = do
+            res <- checkCduceTestCase M.impl testCase
+            pure (maybeToList res ++ timeouts)

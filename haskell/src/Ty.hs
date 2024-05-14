@@ -36,24 +36,29 @@ instance PrettyPrec Ty where
       TyProd t1 t2 -> parens (pretty t1 <> comma <> pretty t2)
       TyAnyProd -> pretty "prod"
       TyUnion t1 t2 ->
-        withParens prec 1 $
-          (prettyPrec 2 t1) <>
-          pretty "∨" <>
-          (prettyPrec 2 t2)
+        withParens prec unionPrec $
+          (prettyPrec unionPrec t1) <>
+          pretty " | " <>
+          (prettyPrec unionPrec t2)
       TyInter t1 t2 ->
-        withParens prec 2 $
-          (prettyPrec 3 t1) <>
-          pretty "∧" <>
-          (prettyPrec 3 t2)
+        withParens prec interPrec $
+          (prettyPrec interPrec t1) <>
+          pretty " & " <>
+          (prettyPrec interPrec t2)
       TyDiff t1 t2 ->
-        withParens prec 2 $
-          (prettyPrec 3 t1) <>
-          pretty "\\" <>
-          (prettyPrec 3 t2)
+        withParens prec diffPrec $
+          (prettyPrec diffPrec t1) <>
+          pretty " - " <>
+          (prettyPrec diffPrec t2)
       TyNeg t ->
-        withParens prec 3 $
-          pretty "¬" <>
-          prettyPrec 4 t
+        withParens prec negPrec $
+          pretty "~" <>
+          prettyPrec (negPrec - 1) t
+    where
+      unionPrec = 1
+      interPrec = 2
+      diffPrec = unionPrec
+      negPrec = 4
 
 arbitraryTyBinOp :: Int -> (Ty -> Ty -> Ty) -> Gen Ty
 arbitraryTyBinOp size f = do

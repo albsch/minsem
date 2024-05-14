@@ -11,6 +11,7 @@ module Minsem (
 import GHC.Generics
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashMap.Strict (HashMap)
+import qualified Data.HashSet as HashSet
 import Data.Hashable
 import qualified Control.Monad.State.Strict as S
 import qualified Data.Foldable as F
@@ -102,6 +103,9 @@ prod' a b = prod (Prod a b)
 negatedProd :: Prod -> Dnf Prod
 negatedProd p = Dnf [Conj [] [p]]
 
+anyProd :: Dnf Prod
+anyProd = Dnf [Conj [Prod tyAny tyAny] []]
+
 tyAtom :: Bool -> Ty
 tyAtom b = IsTyRec (TyRec (atom (Atom b)) (Dnf []))
 
@@ -177,7 +181,7 @@ negTyRec (TyRec f t) = do
     pure $ TyRec f' t'
   where
     negAtom :: Dnf Atom -> T (Dnf Atom)
-    negAtom f = dnf f processAtom intersectDnf
+    negAtom f = dnf f anyAtom processAtom intersectDnf
     processAtom :: Conj Atom -> T (Dnf Atom)
     processAtom conj =
         let (x:xs) =
@@ -185,7 +189,7 @@ negTyRec (TyRec f t) = do
                 [atom t | t <- c_neg conj]
         in pure (F.foldl' unionDnf x xs)
     negProd :: Dnf Prod -> T (Dnf Prod)
-    negProd p = dnf p processProd intersectDnf
+    negProd p = dnf p anyProd processProd intersectDnf
     processProd :: Conj Prod -> T (Dnf Prod)
     processProd conj =
         let (x:xs) =
@@ -193,11 +197,9 @@ negTyRec (TyRec f t) = do
                 [prod t | t <- c_neg conj]
         in pure (F.foldl' unionDnf x xs)
 
-dnf :: Dnf a -> (Conj a -> T b) -> (b -> b -> b) -> T b
-dnf (Dnf (x:xs)) f c = do
-    start <- f x
+dnf :: Dnf a -> b -> (Conj a -> T b) -> (b -> b -> b) -> T b
+dnf (Dnf xs) start f c = do
     foldM (\b a -> f a >>= \x -> pure (c b x)) start xs
-dnf (Dnf []) _ _ = error "empty DNF"
 
 unionDnf :: Hashable a => Dnf a -> Dnf a -> Dnf a
 unionDnf (Dnf l1) (Dnf l2) =
@@ -281,9 +283,12 @@ tyRecIsEmpty t@(TyRec atoms prods) memo = trace ("tyRecIsEmpty " ++ showPretty t
     pure (b1 && b2)
     where
         isEmptyAtoms :: Dnf Atom -> T Bool
-        isEmptyAtoms d = dnf d (\(Conj _ neg) -> pure (not (null neg))) (&&)
+        isEmptyAtoms d = dnf d True isEmptyAtomsConj (&&)
+        isEmptyAtomsConj (Conj pos neg) =
+            let posSet = HashSet.fromList pos
+            in pure $ HashSet.size posSet > 1 || any (\n -> n `HashSet.member` posSet) neg
         isEmptyProds :: Dnf Prod -> Memo Bool -> T Bool
-        isEmptyProds d memo = dnf d (processProd memo) (&&)
+        isEmptyProds d memo = dnf d True (processProd memo) (&&)
         processProd :: Memo Bool -> Conj Prod -> T Bool
         processProd memo (Conj pos neg) = do
             p <- bigIntersect pos
