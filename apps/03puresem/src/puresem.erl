@@ -72,13 +72,12 @@ id(S = #s{id = Id}) ->
 % this can't be detected and the algorithm does not terminate.
 % Furthermure, we need to check if we already stored syntactically equivalent types in type store already.
 % Otherwise, the algorithm again does not terminate.
-store(NewId, Ty = #ty{}, S = #s{id = Id, ty = Tys}) ->
+store(NewId, Ty = #ty{}, S = #s{ty = Tys}) ->
   case [{I, T} || {I, T} <- maps:to_list(Tys), T =:= Ty] of
     [{OldRef, _}|_] -> 
-          {OldRef, S#s{id = Id - 1}};
-    _ ->
-      NewTy = Ty,
-      {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => NewTy }}}
+      {OldRef, S};
+    _ -> 
+      {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => Ty }}}
     end.
 
 
@@ -144,10 +143,10 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
         NewMemo =  Memo#{Corec => NewId},
         Unfolded = UnfoldMaybeList(Corec),
 
-        TyRec = Continue(Unfolded,NewMemo, S0),
+        {TyRec, S1} = Continue(Unfolded,NewMemo, S0),
         % smart constructor
-        {Ref, S1} = store(NewId, TyRec, S0),
-        {Ref, S1};
+        {Ref, S2} = store(NewId, TyRec, S1),
+        {Ref, S2};
        % 'unfold' the input(s), memoize the constant term, and apply Continue.
        {const, Const} -> 
         Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
@@ -161,11 +160,11 @@ negate(Ty, Memo, S) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/3, S)
 % Negation delegates the operation onto its components.
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
-negate(#ty{flag = F, product = Prod}, M, _S) -> 
+negate(#ty{flag = F, product = Prod}, M, S) -> 
   % io:format(user,"Negating: ~p~n~p~n", [F, M]),
  FlagDnf = negate_flag_dnf(F, M),
  ProductDnf = negate_product_dnf(Prod, M),
- #ty{flag = FlagDnf, product = ProductDnf}.
+ {#ty{flag = FlagDnf, product = ProductDnf}, S}.
 
 -spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
 negate_flag_dnf(Dnf, _Memo) -> 
@@ -220,12 +219,12 @@ union(Ty, Ty2, S) -> corec_ref([Ty, Ty2], #{}, fun cunion/3, S).
 -spec cintersect ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cintersect([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cintersect/3, S);
 cintersect([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- #ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}.
+ {#ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}, S}.
 
 -spec cunion ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cunion([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cunion/3, S);
 cunion([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- #ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}.
+ {#ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}, S}.
 
 
 
@@ -326,7 +325,7 @@ usage_teste() ->
    io:format(user,"done: ~n", []),
    {true, _} = is_empty(Empty, S1),
 
-  io:format(user,"Custom: ~p~n", [S1]),
+   io:format(user,"Custom: ~p~n", [S1]),
 
    % define a custom any type
    % get new ID
