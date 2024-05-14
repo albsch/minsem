@@ -59,6 +59,7 @@ test_basicMinsem = do
     printRepr M.impl TyBottom
     printRepr M.impl (TyAtom True)
     printRepr M.impl (TyAtom False)
+    printRepr M.impl (TyInter (TyAtom False) (TyNeg TyBottom))
     printRepr M.impl (TyUnion TyTop TyTop)
     printRepr M.impl (TyInter TyTop TyTop)
     printRepr M.impl (TyNeg TyTop)
