@@ -2,7 +2,6 @@
 -compile(nowarn_export_all).
 -compile(export_all).
 
--type ty() ::       ty_ref() | ty_rec().
 -type product() :: {ty_ref(), ty_ref()}.
 -type flag() :: true.
 
@@ -63,7 +62,7 @@ negated_product(P) -> [{[], [P]}].
 ctx() ->
   Any = {ty_ref, 0},
   % we define the corecursive type and close it at the same time.
-  AnyRec = #ty{id = 0, flag = (F = flag()), product = (P = product(Any, Any))},
+  AnyRec = #ty{id = 0, flag = flag(), product = product(Any, Any)},
   % we also add the hash of the Any function to the hash table, 
   % even though it will never be accessed again in our implementation;
   % any new corecursive type gets its own unique ID, 
@@ -83,7 +82,7 @@ id(S = #s{id = Id}) ->
 % preconditions: 
 % id = open
 % id of product ty refs: defined (and therefore tracked in state)
-store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{id = Id, htbl = Htbl, ty = Tys}) ->
+store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{htbl = Htbl, ty = Tys}) ->
   H = hash(Ty),
   case Htbl of
     #{H := Refs} -> 
@@ -91,7 +90,7 @@ store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{id = Id, htbl = 
       case [X || X <- Refs, begin #{X := #ty{flag = FTy, product = PTy}} = Tys, {FTy, PTy} =:= {F, P} end] of
         [Ref] -> 
           % io:format(user, "Share hit for ~p!~n", [Ref]),
-          {Ref, S#s{id = Id - 1}};
+          {Ref, S};
         _ -> 
           NewTy = Ty#ty{id = NewId},
           % io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
@@ -166,10 +165,10 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
         NewMemo =  Memo#{Corec => NewId},
         Unfolded = UnfoldMaybeList(Corec),
 
-        TyRec = Continue(Unfolded,NewMemo, S0),
+        {TyRec, S1} = Continue(Unfolded,NewMemo, S0),
         % smart constructor
-        {Ref, S1} = store(NewId, TyRec, S0),
-        {Ref, S1};
+        {Ref, S2} = store(NewId, TyRec, S1),
+        {Ref, S2};
        % 'unfold' the input(s), memoize the constant term, and apply Continue.
        {const, Const} -> 
         Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
@@ -179,15 +178,15 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
 
 -spec negate(ty_ref(), memo(), s()) -> {ty_ref(), s()}; (ty_rec(), memo(), s()) -> {ty_rec(), s()}.
 % This definition is used to continue a (nested) corecursive negation
-negate(Ty, Memo, S) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/3, S);
+negate(Ty = {ty_ref, _}, Memo, S) -> corec_ref(Ty, Memo, fun negate/3, S);
 % Negation delegates the operation onto its components.
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
-negate(#ty{flag = F, product = Prod}, M, _S) -> 
+negate(#ty{flag = F, product = Prod}, M, S) -> 
   % io:format(user,"Negating: ~p~n~p~n", [F, M]),
  FlagDnf = negate_flag_dnf(F, M),
  ProductDnf = negate_product_dnf(Prod, M),
- #ty{flag = FlagDnf, product = ProductDnf}.
+ {#ty{flag = FlagDnf, product = ProductDnf}, S}.
 
 -spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
 negate_flag_dnf(Dnf, _Memo) -> 
@@ -243,12 +242,12 @@ union(Ty, Ty2, S) -> corec_ref([Ty, Ty2], #{}, fun cunion/3, S).
 -spec cintersect ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cintersect([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cintersect/3, S);
 cintersect([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- #ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}.
+ {#ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}, S}.
 
 -spec cunion ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cunion([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cunion/3, S);
 cunion([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- #ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}.
+ {#ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}, S}.
 
 
 
@@ -318,6 +317,7 @@ phi(TS1, TS2, [{T1, T2} | N], Left, Right, Memo, S) ->
 
 
 %% Exercises:
+%% - Implement a good structural hashing function
 %% - Implement hashing modulo alpha-equivalence (PLDI'21)
 
 -ifdef(TEST).
