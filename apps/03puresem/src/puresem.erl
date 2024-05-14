@@ -75,11 +75,48 @@ id(S = #s{id = Id}) ->
 store(NewId, Ty = #ty{}, S = #s{ty = Tys}) ->
   case [{I, T} || {I, T} <- maps:to_list(Tys), T =:= Ty] of
     [{OldRef, _}|_] -> 
+      % store returns an old ID
+      % is this a problem?
+      check_new_id(S, {ty_ref, NewId}),
       {OldRef, S};
     _ -> 
       {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => Ty }}}
     end.
 
+
+check_new_id(S = #s{ty = Tys}, TyRef) ->
+  false = lists:any(fun({Ref, _Ty}) -> 
+    TyRef =:= Ref
+    orelse 
+    begin {Result, S} = check_ty(Ref, TyRef, S), Result end
+  end, maps:to_list(Tys)).
+
+% now for the main part, emptyness checking
+-spec check_ty(ty_rec(), ty_ref(), s()) -> {boolean(), s()}.
+check_ty(Ref, CheckTyRef, S) -> 
+ corec_const(Ref, #{}, fun(Rec0, Memo0, S0) -> 
+  ucheck_ty(Rec0, CheckTyRef, Memo0, S0) end, false, S).
+
+-spec ucheck_ty(ty_ref(), ty_ref(), memo(), s()) -> {boolean(), s()}; 
+               (ty_rec(), ty_ref(), memo(), s()) -> {boolean(), s()}.
+ucheck_ty(Ty = {ty_ref, _}, CheckRef, Memo, S) -> 
+  corec_const(Ty, Memo, fun(R0, M0, S0) -> ucheck_ty(R0, CheckRef, M0, S0) end, false, S);
+ucheck_ty(#ty{product = ProdDnf}, CheckRef, Memo, S) ->
+ X = dnf(ProdDnf, {
+   fun(Pos, Neg, Si) -> 
+    % this only works because we know that the state is not changed
+    {lists:any(fun
+      ({T1, T2}) when T1 == CheckRef; T2 == CheckRef -> true;
+      ({T1, T2}) -> 
+        {Res, Si} = ucheck_ty(T1, CheckRef, Memo, Si),
+        {Res2, Si} = ucheck_ty(T2, CheckRef, Memo, Si),
+        Res or Res2
+    end, Pos ++ Neg), S}
+   end, 
+   fun(R1, R2, Si) -> 
+    {R1 or R2, Si} end
+ }, S),
+ X.
 
 % Defining the top type
 % Any = true U. {Any, Any}
