@@ -3,6 +3,7 @@ module Ty where
 import Test.QuickCheck
 import GHC.Generics
 import Iface
+import Pretty
 
 data Ty =
     TyTop
@@ -15,11 +16,44 @@ data Ty =
     | TyInter Ty Ty
     | TyDiff Ty Ty
     | TyNeg Ty
-    deriving (Show, Eq, Generic)
+    deriving (Show, Read, Eq, Generic)
 
 instance Arbitrary Ty where
     arbitrary = sized arbitraryTy
     shrink = genericShrink
+
+instance Pretty Ty where
+  pretty = prettyPrec 0
+
+instance PrettyPrec Ty where
+  prettyPrec prec t =
+    case t of
+      TyTop -> pretty "top"
+      TyBottom -> pretty "bottom"
+      TyAtom True -> pretty "True"
+      TyAtom False -> pretty "False"
+      TyAnyAtom -> pretty "atom"
+      TyProd t1 t2 -> parens (pretty t1 <> comma <> pretty t2)
+      TyAnyProd -> pretty "prod"
+      TyUnion t1 t2 ->
+        withParens prec 1 $
+          (prettyPrec 2 t1) <>
+          pretty "∨" <>
+          (prettyPrec 2 t2)
+      TyInter t1 t2 ->
+        withParens prec 2 $
+          (prettyPrec 3 t1) <>
+          pretty "∧" <>
+          (prettyPrec 3 t2)
+      TyDiff t1 t2 ->
+        withParens prec 2 $
+          (prettyPrec 3 t1) <>
+          pretty "\\" <>
+          (prettyPrec 3 t2)
+      TyNeg t ->
+        withParens prec 3 $
+          pretty "¬" <>
+          prettyPrec 4 t
 
 arbitraryTyBinOp :: Int -> (Ty -> Ty -> Ty) -> Gen Ty
 arbitraryTyBinOp size f = do
