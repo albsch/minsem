@@ -1,17 +1,14 @@
-module BasicTests where
+{-# OPTIONS_GHC -F -pgmF htfpp #-}
+module BasicTests (htf_thisModulesTests) where
 
 import Ty
 import Iface
 import qualified Minsem as M
 import Pretty
-import Control.Monad
 import System.Timeout
 import Control.Exception (evaluate)
 import Utils
-
-assertTrue :: Bool -> IO ()
-assertTrue True = pure ()
-assertTrue False = error "expected True given False"
+import Test.Framework
 
 subTyTimeout :: Int
 subTyTimeout = 2 * 1000 * 1000 -- in microseconds
@@ -30,19 +27,25 @@ assertSubTy impl t1 t2 b = do
     x <- timeout subTyTimeout $ timeIt $ evaluate (run impl (isSubTy impl t1 t2))
     case x of
         Nothing ->
-            fail ("Subtype checked timed out.")
+            assertFailure ("Subtype checked timed out.")
         Just (((res, t), s), delta) -> do
             putStrLn ("Result for " ++ show t1 ++ " <= " ++ show t2 ++ ": " ++ show res ++
                 ", " ++ show delta)
-            when (b /= res) $
-                fail ("Expected " ++ show b ++ " got " ++ show res ++ "\nInternal type: " ++
-                      showPretty t ++ "\n" ++ show (indent 2 (pretty s)))
+            assertEqualVerbose
+                ("Internal type: " ++ showPretty t ++ "\n" ++
+                 show (indent 2 (pretty s)))
+                b res
 
 basicTests :: (Pretty t, Pretty s, Monad m) => SemIface t s m -> IO ()
 basicTests impl = do
-    assertSubTy impl TyTop TyTop True
-    assertSubTy impl TyTop TyBottom False
-    assertSubTy impl TyBottom TyTop True
+    subAssert $ assertSubTy impl TyTop TyTop True
+    subAssert $ assertSubTy impl TyTop TyBottom False
+    subAssert $ assertSubTy impl TyBottom TyTop True
+    let t1 = TyAtom False
+        t2 = TyDiff TyAnyAtom TyTop
+    subAssert $ assertSubTy impl t1 TyBottom False
+    subAssert $ assertSubTy impl t2 TyBottom True
+    subAssert $ assertSubTy impl (TyProd t1 t2) TyBottom True
 
 printRepr :: (Pretty t, Pretty s, Monad m) => SemIface t s m -> Ty -> IO ()
 printRepr impl t = do
@@ -55,6 +58,7 @@ test_basicMinsem = do
     printRepr M.impl TyTop
     printRepr M.impl TyBottom
     printRepr M.impl (TyAtom True)
+    printRepr M.impl (TyAtom False)
     printRepr M.impl (TyUnion TyTop TyTop)
     printRepr M.impl (TyInter TyTop TyTop)
     printRepr M.impl (TyNeg TyTop)

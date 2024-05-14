@@ -19,7 +19,10 @@ executable Minsem
     import:           warnings
     main-is:          Main.hs
     other-modules:
+        AllTests,
         BasicTests,
+        CduceTestGen,
+        CduceTests,
         Iface,
         Minsem,
         Pretty,
@@ -28,9 +31,12 @@ executable Minsem
         Utils
     build-depends:
         base ^>=4.16.4.0,
+        directory,
         hashable,
+        HTF,
         mtl,
         prettyprinter,
+        process,
         QuickCheck,
         text,
         time,
