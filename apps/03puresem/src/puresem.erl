@@ -149,14 +149,14 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
         {Ref, S2};
        % 'unfold' the input(s), memoize the constant term, and apply Continue.
        {const, Const} -> 
-        Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
+         {Reff, S0} = Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
      end
  end.
 
 
 -spec negate(ty_ref(), memo(), s()) -> {ty_ref(), s()}; (ty_rec(), memo(), s()) -> {ty_rec(), s()}.
 % This definition is used to continue a (nested) corecursive negation
-negate(Ty, Memo, S) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/3, S);
+negate(Ty = {ty_ref, _}, Memo, S) -> corec_ref(Ty, Memo, fun negate/3, S);
 % Negation delegates the operation onto its components.
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
