@@ -70,7 +70,9 @@ ctx() ->
   % TODO explain hash collisions
   #s{id = 1, ty = #{Any => AnyRec}, htbl = #{ hash(AnyRec) => [Any] }}.
 
-hash(#ty{flag = _Flag, product = _Product}) ->
+hash(#ty{id = Id, flag = _Flag, product = _Product}) ->
+  % sanity check, only hash valid types
+  true = (Id /= open),
   % algorithm should work for bad hash functions, too
   % erlang:phash2({_Flag, _Product}).
   17.
@@ -82,23 +84,24 @@ id(S = #s{id = Id}) ->
 % preconditions: 
 % id = open
 % id of product ty refs: defined (and therefore tracked in state)
-store(NewId, Ty = #ty{id = open, flag = F, product = P}, S = #s{htbl = Htbl, ty = Tys}) ->
+store(NewId, OldTy = #ty{id = open, flag = F, product = P}, S = #s{htbl = Htbl, ty = Tys}) ->
+  Ty = OldTy#ty{id = NewId},
   H = hash(Ty),
   case Htbl of
     #{H := Refs} -> 
       % a good hash function should produce a lot of share hits and less collisions
       case [X || X <- Refs, begin #{X := #ty{flag = FTy, product = PTy}} = Tys, {FTy, PTy} =:= {F, P} end] of
         [Ref] -> 
-          % io:format(user, "Share hit for ~p!~n", [Ref]),
+          io:format(user, "Share hit for ~p!~n", [Ref]),
           {Ref, S};
         _ -> 
           NewTy = Ty#ty{id = NewId},
-          % io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
+          io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
           {{ty_ref, NewId}, S#s{htbl = Htbl#{H => Refs ++ [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
         end;
     _ ->
       NewTy = Ty#ty{id = NewId},
-      % io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
+      io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
       {{ty_ref, NewId}, S#s{htbl = Htbl#{H => [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
     end.
 
