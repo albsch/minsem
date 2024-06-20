@@ -33,12 +33,21 @@ negated_function(P) -> [{[], [P]}].
 % A fresh context consists of a counter and an empty map for types.
 % This context is added to the input of every function that handle types.
 % We statically define the recursive type Any type and assign it the ID 0.
+% At the same time we need to define the mutually recursive Empty type since the Any type contains the Empty type in the function type space.
 -spec ctx() -> s().
 ctx() ->
+  % we open and define two corecursive types at the same time, Any and Empty
+  % X0 = ...
   Any = {ty_ref, 0},
-  % we define the corecursive type and close it at the same time.
-  AnyRec = #ty{flag = (flag()), function = (function(Any, Any))},
-  #s{id = 1, ty = #{Any => AnyRec}}.
+  % X1 = ...
+  Empty = {ty_ref, 1},
+
+  % X0 = true U X1 -> X0
+  AnyRec = #ty{flag = flag(), function = function(Empty, Any)},
+  % X1 = !true U !(X1 -> X0)
+  EmptyRec = #ty{flag = negated_flag(), function = negated_function(F)},
+
+  #s{id = 2, ty = #{Any => AnyRec, Empty => EmptyRec}}.
 
 id(S = #s{id = Id}) ->
   {Id, S#s{id = Id + 1}}.
@@ -55,54 +64,22 @@ id(S = #s{id = Id}) ->
 store(NewId, Ty = #ty{}, S = #s{ty = Tys}) ->
   case [{I, T} || {I, T} <- maps:to_list(Tys), T =:= Ty] of
     [{OldRef, _}|_] -> 
-      % store returns an old ID
-      % is this a problem?
-      check_new_id(S, {ty_ref, NewId}),
       {OldRef, S};
     _ -> 
       {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => Ty }}}
     end.
-
-
-check_new_id(S = #s{ty = Tys}, TyRef) ->
-  false = lists:any(fun({Ref, _Ty}) -> 
-    TyRef =:= Ref
-    orelse 
-    begin {Result, S} = check_ty(Ref, TyRef, S), Result end
-  end, maps:to_list(Tys)).
-
-% now for the main part, emptyness checking
--spec check_ty(ty_rec(), ty_ref(), s()) -> {boolean(), s()}.
-check_ty(Ref, CheckTyRef, S) -> 
- corec_const(Ref, #{}, fun(Rec0, Memo0, S0) -> 
-  ucheck_ty(Rec0, CheckTyRef, Memo0, S0) end, false, S).
-
--spec ucheck_ty(ty_ref(), ty_ref(), memo(), s()) -> {boolean(), s()}; 
-               (ty_rec(), ty_ref(), memo(), s()) -> {boolean(), s()}.
-ucheck_ty(Ty = {ty_ref, _}, CheckRef, Memo, S) -> 
-  corec_const(Ty, Memo, fun(R0, M0, S0) -> ucheck_ty(R0, CheckRef, M0, S0) end, false, S);
-ucheck_ty(#ty{function = FunctionDnf}, CheckRef, Memo, S) ->
- X = dnf(FunctionDnf, {
-   fun(Pos, Neg, Si) -> 
-    % this only works because we know that the state is not changed
-    {lists:any(fun
-      ({T1, T2}) when T1 == CheckRef; T2 == CheckRef -> true;
-      ({T1, T2}) -> 
-        {Res, Si} = ucheck_ty(T1, CheckRef, Memo, Si),
-        {Res2, Si} = ucheck_ty(T2, CheckRef, Memo, Si),
-        Res or Res2
-    end, Pos ++ Neg), S}
-   end, 
-   fun(R1, R2, Si) -> 
-    {R1 or R2, Si} end
- }, S),
- X.
 
 % Defining the top type
 % Any = true U. Empty -> Any
 % references the statically created type in the state.
 -spec any() -> ty_ref().
 any() -> {ty_ref, 0}.
+
+% ideally, empty should now map to {ty_ref, 1}
+% but it will not?
+-spec empty(s()) -> {ty_ref(), s()}.
+empty(S) -> negate(any(), S).
+
 
 % the constructors do not change
 -spec ty(dnf(flag()), dnf(function())) -> ty_rec().
@@ -115,11 +92,6 @@ ty_flag(Flag, S) ->
 -spec ty_function(dnf(function())) -> ty_rec().
 ty_function(Function) -> #ty{flag = negated_flag(), function = Function}.
 
-
-% The Empty type is still defined in terms of Any; this time, 
-% we store and share every newly created type in the context.
--spec empty(s()) -> {ty_ref(), s()}.
-empty(S) -> negate(any(), S).
 
 % Each corecursive function has access to the state 
 -spec negate(ty_ref(), s()) -> {ty_ref(), s()}.
@@ -177,11 +149,11 @@ negate(Ty = {ty_ref, _}, Memo, S) -> corec_ref(Ty, Memo, fun negate/3, S);
 % Negation delegates the operation onto its components.
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
-negate(#ty{flag = F, product = Prod}, M, S) -> 
+negate(#ty{flag = F, function = Function}, M, S) -> 
   % io:format(user,"Negating: ~p~n~p~n", [F, M]),
  FlagDnf = negate_flag_dnf(F, M),
- ProductDnf = negate_product_dnf(Prod, M),
- {#ty{flag = FlagDnf, product = ProductDnf}, S}.
+ functionDnf = negate_function_dnf(Function, M),
+ {#ty{flag = FlagDnf, function = functionDnf}, S}.
 
 -spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
 negate_flag_dnf(Dnf, _Memo) -> 
@@ -191,15 +163,15 @@ negate_flag_dnf(Dnf, _Memo) ->
    end, fun(Dnf1, Dnf2, S) -> {intersect_dnf(Dnf1, Dnf2), S} end}, ctx()),
   Flag.
 
--spec negate_product_dnf(dnf(product()), memo()) -> dnf(product()).
-negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
- {Prod, _} = dnf(Dnf, {fun(P, N, S) -> 
-     [X | Xs] = [negated_product(T) || T <- P] ++ [product(T) || T <- N],
+-spec negate_function_dnf(dnf(function()), memo()) -> dnf(function()).
+negate_function_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
+ {Function, _} = dnf(Dnf, {fun(P, N, S) -> 
+     [X | Xs] = [negated_function(T) || T <- P] ++ [function(T) || T <- N],
      {lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs), S}
    end, fun(Dnf1, Dnf2, S) -> {intersect_dnf(Dnf1, Dnf2), S} end}, ctx()),
-  Prod.
+  Function.
 
-% flag/product dnf line
+% flag/function dnf line
 -spec dnf(dnf(Atom), {
   fun(([Atom], [Atom], s()) -> {Result, s()}), 
   fun((Result, Result, s()) -> {Result, s()})
@@ -235,13 +207,13 @@ union(Ty, Ty2, S) -> corec_ref([Ty, Ty2], #{}, fun cunion/3, S).
 % wrapper functions for single argument type operators
 -spec cintersect ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cintersect([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cintersect/3, S);
-cintersect([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- {#ty{flag = intersect_dnf(F1, F2), product = intersect_dnf(P1, P2)}, S}.
+cintersect([#ty{flag = F1, function = P1}, #ty{flag = F2, function = P2}], _Memo, S) ->
+ {#ty{flag = intersect_dnf(F1, F2), function = intersect_dnf(P1, P2)}, S}.
 
 -spec cunion ([ty_ref()], memo(), s()) -> {ty_ref(), s()}; ([ty_rec()], memo(), s()) -> {ty_rec(), s()}.
 cunion([Ty1 = {ty_ref, _}, Ty2 = {ty_ref, _}], Memo, S) -> corec_ref([Ty1, Ty2], Memo, fun cunion/3, S);
-cunion([#ty{flag = F1, product = P1}, #ty{flag = F2, product = P2}], _Memo, S) ->
- {#ty{flag = union_dnf(F1, F2), product = union_dnf(P1, P2)}, S}.
+cunion([#ty{flag = F1, function = P1}, #ty{flag = F2, function = P2}], _Memo, S) ->
+ {#ty{flag = union_dnf(F1, F2), function = union_dnf(P1, P2)}, S}.
 
 
 
@@ -252,10 +224,10 @@ is_empty(Ty, S) ->
 
 -spec is_empty(ty_ref(), memo(), s()) -> {boolean(), s()}; (ty_rec(), memo(), s()) -> {boolean(), s()}.
 is_empty(Ty = {ty_ref, _}, Memo, S) -> corec_const(Ty, Memo, fun is_empty/3, true, S);
-is_empty(#ty{flag = FlagDnf, product = ProdDnf}, Memo, S) ->
+is_empty(#ty{flag = FlagDnf, function = FunctionDnf}, Memo, S) ->
   ResFlag = is_empty_flag(FlagDnf, Memo),
-  {ResProd, S0} = is_empty_prod(ProdDnf, Memo, S),
-  {ResFlag and ResProd, S0}.
+  {ResFunction, S0} = is_empty_prod(FunctionDnf, Memo, S),
+  {ResFlag and ResFunction, S0}.
 
 -spec is_empty_flag(dnf(flag()), memo()) -> boolean().
 % flag emptyness, empty iff: (true in N)
@@ -266,15 +238,15 @@ is_empty_flag(FlagDnf, _Memo) -> % memo not needed, no corecursive components
 -spec is_empty_prod(dnf(product()), memo(), s()) -> {boolean(), s()}.
 % product emptyness, empty iff: product dnf empty
 is_empty_prod(Dnf, Memo, S) ->
- dnf(Dnf, {
-   fun(Pos, Neg, Si) -> 
-     % intersect all positive products, and execute full tree exploration phi
-     {{Ty1, Ty2}, S0} = big_intersect(Pos, Si),
-     phi(Ty1, Ty2, Neg, Memo, S0)
-   end, 
-   fun(R1, R2, Si) -> 
-    {R1 and R2, Si} end
- }, S).
+  dnf(Dnf, {fun
+      (Pos, Neg, Si) -> 
+        {BigSTuple, S0} = lists:foldl(fun({arrow, V, _T}, {Domain, SAcc}) -> union(V, Domain, SAcc) end, {empty(), S}, Pos),
+        is_empty_arrow_cont(BigSTuple, Pos, Neg, Memo, S0)
+    end, 
+    fun(R1, R2, Si) -> {R1 and R2, Si} end
+  }).
+
+% TODO is_empty_arrow_cont
 
 -spec big_intersect([product()], s()) -> {product(), s()}.
 big_intersect([], S) -> {{any(), any()}, S};
