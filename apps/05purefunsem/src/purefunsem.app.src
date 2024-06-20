@@ -1,0 +1,8 @@
+{application, purefunsem,
+ [{description, "Minimal pure semantic subtyping library"},
+  {vsn, "v1"},
+  {applications,
+   [kernel,
+    stdlib
+   ]}
+ ]}.

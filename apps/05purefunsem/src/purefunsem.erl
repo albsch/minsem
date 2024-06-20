@@ -1,82 +1,44 @@
--module(sharesem).
+-module(purefunsem).
 -compile(nowarn_export_all).
 -compile(export_all).
 
--type product() :: {ty_ref(), ty_ref()}.
+% like puresem, but with functions instead of products
+% the challenge is to create an empty type when the initial state is created without predefining it
+
+-type ty() ::       ty_ref() | ty_rec().
+-type function() :: {ty_ref(), ty_ref()}.
 -type flag() :: true.
 
-
-% a ty_ref is now a pointer
 -type ty_ref ():: {ty_ref, integer()}.
-
-% Now a type record has its own ID and needs to be closed/defined manually
-% The ID can be anything, it's usually a monotonically increasing counter
--record(ty, {
-          id = open :: integer() | open, 
-          flag      :: dnf(flag()), 
-          product   :: dnf(product())
-         }). 
+-record(ty, { flag      :: dnf(flag()), function   :: dnf(function()) }). 
 -type ty_rec () :: #ty{}.
-
-% We need to manually track the id to type record mapping.
-% We'll first implement a pure version.
-% We have three options for hash tables in Erlang that are pure and efficient:
-% (Big) maps (HAMT), custom hash table (Erlang), custom hash table (C Nif).
-% 
-% Whereas implemeting a custom hash table in C would be the most efficient,
-% it's unfeasible and likely premature optimization.
-% A custom hash table in Erlang is much slower than maps 
-% in Erlang which are implemented in C and implement the fast hash array mapped tries.
-
-% memo stays the same
 -type memo() :: #{}.
-
 -type dnf(Atom) :: [{[Atom], [Atom]}]. 
 -spec flag() -> dnf(true).
 flag() -> [{[true], []}].
 -spec negated_flag() -> dnf(true).
 negated_flag() -> [{[], [true]}].
--spec product(ty_ref(), ty_ref()) -> dnf(product()).
-product(A, B) -> [{[{A, B}], []}].
--spec product(product()) -> dnf(product()).
-product(P) -> [{[P], []}].
--spec negated_product(product()) -> dnf(product()).
-negated_product(P) -> [{[], [P]}].
 
-% The state is now explicit and can be modified by any function
-% The state keeps track of:
-% * The next unused ID for a new type
-% * The type map, mapping type pointers to type records
-% * The hash table for type records to enable structure sharing
--record(s, {id = 0, ty = #{}, htbl = #{}}).
+% same constructors as product
+-spec function(ty_ref(), ty_ref()) -> dnf(function()).
+function(A, B) -> [{[{A, B}], []}].
+-spec function(function()) -> dnf(function()).
+function(P) -> [{[P], []}].
+-spec negated_function(function()) -> dnf(function()).
+negated_function(P) -> [{[], [P]}].
+
+-record(s, {id = 0, ty = #{}}).
 -type s() :: #s{}.
 
-% A fresh context consists of a counter and an empty map for types and an empty hash table for type records.
+% A fresh context consists of a counter and an empty map for types.
 % This context is added to the input of every function that handle types.
 % We statically define the recursive type Any type and assign it the ID 0.
-% In our implementation, every new corecursive type gets a new ID, cannot be distinguished and is not shared.
-% To ensure termination, at least the Any type needs to be shared.
-% Otherwise, many equations alpha-equivalent to Any are created,
-% this can't be detected and the algorithm does not terminate.
 -spec ctx() -> s().
 ctx() ->
   Any = {ty_ref, 0},
   % we define the corecursive type and close it at the same time.
-  AnyRec = #ty{id = 0, flag = flag(), product = product(Any, Any)},
-  % we also add the hash of the Any function to the hash table, 
-  % even though it will never be accessed again in our implementation;
-  % any new corecursive type gets its own unique ID, 
-  % there will never be a corecursive type that matches the hash 
-  % TODO explain hash collisions
-  #s{id = 1, ty = #{Any => AnyRec}, htbl = #{ hash(AnyRec) => [Any] }}.
-
-hash(#ty{id = Id, flag = _Flag, product = _Product}) ->
-  % sanity check, only hash valid types
-  true = (Id /= open),
-  % algorithm should work for bad hash functions, too
-  % erlang:phash2({_Flag, _Product}).
-  17.
-
+  AnyRec = #ty{flag = (flag()), function = (function(Any, Any))},
+  #s{id = 1, ty = #{Any => AnyRec}}.
 
 id(S = #s{id = Id}) ->
   {Id, S#s{id = Id + 1}}.
@@ -84,45 +46,74 @@ id(S = #s{id = Id}) ->
 % preconditions: 
 % id = open
 % id of product ty refs: defined (and therefore tracked in state)
-store(NewId, OldTy = #ty{id = open, flag = F, product = P}, S = #s{htbl = Htbl, ty = Tys}) ->
-  Ty = OldTy#ty{id = NewId},
-  H = hash(Ty),
-  case Htbl of
-    #{H := Refs} -> 
-      % a good hash function should produce a lot of share hits and less collisions
-      case [X || X <- Refs, 
-        begin #{X := #ty{flag = FTy, product = PTy}} = Tys, {FTy, PTy} =:= {F, P} end] of
-        [Ref] -> 
-          io:format(user, "Share hit for ~p!~n", [Ref]),
-          {Ref, S};
-        _ -> 
-          NewTy = Ty#ty{id = NewId},
-          io:format(user, "Store ~p:= (collision)~n~p~n", [NewId, NewTy]),
-          {{ty_ref, NewId}, S#s{htbl = Htbl#{H => Refs ++ [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
-        end;
-    _ ->
-      NewTy = Ty#ty{id = NewId},
-      io:format(user, "Store ~p:~n~p~n", [NewId, NewTy]),
-      {{ty_ref, NewId}, S#s{htbl = Htbl#{H => [{ty_ref, NewId}]}, ty = Tys#{{ty_ref, NewId} => NewTy }}}
+% In our implementation, every new corecursive type gets a new ID, cannot be distinguished and is not shared.
+% To ensure termination, at least the Any type needs to be shared.
+% Otherwise, many equations alpha-equivalent to Any are created,
+% this can't be detected and the algorithm does not terminate.
+% Furthermure, we need to check if we already stored syntactically equivalent types in type store already.
+% Otherwise, the algorithm again does not terminate.
+store(NewId, Ty = #ty{}, S = #s{ty = Tys}) ->
+  case [{I, T} || {I, T} <- maps:to_list(Tys), T =:= Ty] of
+    [{OldRef, _}|_] -> 
+      % store returns an old ID
+      % is this a problem?
+      check_new_id(S, {ty_ref, NewId}),
+      {OldRef, S};
+    _ -> 
+      {{ty_ref, NewId}, S#s{ty = Tys#{{ty_ref, NewId} => Ty }}}
     end.
 
 
+check_new_id(S = #s{ty = Tys}, TyRef) ->
+  false = lists:any(fun({Ref, _Ty}) -> 
+    TyRef =:= Ref
+    orelse 
+    begin {Result, S} = check_ty(Ref, TyRef, S), Result end
+  end, maps:to_list(Tys)).
+
+% now for the main part, emptyness checking
+-spec check_ty(ty_rec(), ty_ref(), s()) -> {boolean(), s()}.
+check_ty(Ref, CheckTyRef, S) -> 
+ corec_const(Ref, #{}, fun(Rec0, Memo0, S0) -> 
+  ucheck_ty(Rec0, CheckTyRef, Memo0, S0) end, false, S).
+
+-spec ucheck_ty(ty_ref(), ty_ref(), memo(), s()) -> {boolean(), s()}; 
+               (ty_rec(), ty_ref(), memo(), s()) -> {boolean(), s()}.
+ucheck_ty(Ty = {ty_ref, _}, CheckRef, Memo, S) -> 
+  corec_const(Ty, Memo, fun(R0, M0, S0) -> ucheck_ty(R0, CheckRef, M0, S0) end, false, S);
+ucheck_ty(#ty{function = FunctionDnf}, CheckRef, Memo, S) ->
+ X = dnf(FunctionDnf, {
+   fun(Pos, Neg, Si) -> 
+    % this only works because we know that the state is not changed
+    {lists:any(fun
+      ({T1, T2}) when T1 == CheckRef; T2 == CheckRef -> true;
+      ({T1, T2}) -> 
+        {Res, Si} = ucheck_ty(T1, CheckRef, Memo, Si),
+        {Res2, Si} = ucheck_ty(T2, CheckRef, Memo, Si),
+        Res or Res2
+    end, Pos ++ Neg), S}
+   end, 
+   fun(R1, R2, Si) -> 
+    {R1 or R2, Si} end
+ }, S),
+ X.
+
 % Defining the top type
-% Any = true U. {Any, Any}
+% Any = true U. Empty -> Any
 % references the statically created type in the state.
 -spec any() -> ty_ref().
 any() -> {ty_ref, 0}.
 
 % the constructors do not change
--spec ty(dnf(flag()), dnf(product())) -> ty_rec().
-ty(Flag, Product) -> #ty{flag = Flag, product = Product}.
+-spec ty(dnf(flag()), dnf(function())) -> ty_rec().
+ty(Flag, Function) -> #ty{flag = Flag, function = Function}.
 -spec ty_flag(dnf(flag()), s()) -> {ty_rec(), s()}.
 ty_flag(Flag, S) -> 
   {E1, S0} = empty(S),
-  {E2, S1} = empty(S0),
-  {#ty{flag = Flag, product = product(E1, E2)}, S1}.
--spec ty_product(dnf(product())) -> ty_rec().
-ty_product(Product) -> #ty{flag = negated_flag(), product = Product}.
+  {NF, S1} = negate(function(E1, any()), S0),
+  {#ty{flag = Flag, function = NF}, S1}.
+-spec ty_function(dnf(function())) -> ty_rec().
+ty_function(Function) -> #ty{flag = negated_flag(), function = Function}.
 
 
 % The Empty type is still defined in terms of Any; this time, 
@@ -132,8 +123,7 @@ empty(S) -> negate(any(), S).
 
 % Each corecursive function has access to the state 
 -spec negate(ty_ref(), s()) -> {ty_ref(), s()}.
-negate(Ty, S) -> 
-  corec_ref(Ty, #{}, fun negate/3, S).
+negate(Ty, S) -> corec_ref(Ty, #{}, fun negate/3, S).
 
 % we define two corecursive helper operators: 
 % one that introduces new equations and one for constant term memoizations
@@ -176,7 +166,7 @@ corec(Corec, Memo, Continue, Type, S = #s{ty = Tys}) ->
         {Ref, S2};
        % 'unfold' the input(s), memoize the constant term, and apply Continue.
        {const, Const} -> 
-        Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
+         {Reff, S0} = Continue(UnfoldMaybeList(Corec), Memo#{Corec => Const}, S)
      end
  end.
 
@@ -223,7 +213,6 @@ dnf([{Pos, Neg} | Cs], F = {Process, Combine}, S) ->
 % lists:uniq is very important here
 % equations which differ produce a new type which is not memoized, yet equivalent to a previously memoized type
 % e.g. (Any, Any) & (Any, Any) should be represented as (Any, Any)
-% Erlang is then able to hash two closures to the same value
 -spec union_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
 union_dnf(A, B) -> lists:uniq(A ++ B). 
 -spec intersect_dnf(dnf(Ty), dnf(Ty)) -> dnf(Ty).
@@ -322,7 +311,6 @@ phi(TS1, TS2, [{T1, T2} | N], Left, Right, Memo, S) ->
 
 
 %% Exercises:
-%% - Implement a good structural hashing function
 %% - Implement hashing modulo alpha-equivalence (PLDI'21)
 
 -ifdef(TEST).
@@ -354,7 +342,7 @@ usage_teste() ->
    io:format(user,"done: ~n", []),
    {true, _} = is_empty(Empty, S1),
 
-  io:format(user,"Custom: ~p~n", [S1]),
+   io:format(user,"Custom: ~p~n", [S1]),
 
    % define a custom any type
    % get new ID
