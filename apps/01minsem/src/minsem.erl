@@ -169,25 +169,20 @@ negate(Ty, Memo) when is_function(Ty) -> corec_ref(Ty, Memo, fun negate/2);
 % Since the components are made of a DNF structure, 
 % we use a generic dnf traversal for flags and products
 negate(#ty{flag = F, product = Prod}, M) -> 
-  FlagDnf = negate_flag_dnf(F, M),
-  ProductDnf = negate_product_dnf(Prod, M),
-  #ty{flag = FlagDnf, product = ProductDnf}.
+  #ty{flag = negate_dnf(F, M), product = negate_dnf(Prod, M)}.
 
--spec negate_flag_dnf(dnf(flag()), memo()) -> dnf(flag()).
-negate_flag_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
+-spec negate_dnf(dnf(X), memo()) -> dnf(X).
+negate_dnf(Dnf, _Memo) -> 
+  % memo not needed as signs are flipped
   % for each line (Pos, Neg), we flip the atom signs
   % for two flipped lines, we intersect them
   dnf(Dnf, {fun(P, N) -> 
-      [X | Xs] = [negated_flag() || true <- P] ++ [flag() || true <- N],
+      Lines1 = [[{[], [F]}]|| F <- P],
+      Lines2 = [[{[F], []}]|| F <- N],
+      [X | Xs] = (Lines1 ++ Lines2),
       lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs)
     end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1, Dnf2) end}).
 
--spec negate_product_dnf(dnf(product()), memo()) -> dnf(product()).
-negate_product_dnf(Dnf, _Memo) -> % memo not needed as signs are flipped
-  dnf(Dnf, {fun(P, N) -> 
-      [X | Xs] = [negated_product(T) || T <- P] ++ [product(T) || T <- N],
-      lists:foldl(fun(E, Acc) -> union_dnf(E, Acc) end, X, Xs)
-    end, fun(Dnf1, Dnf2) -> intersect_dnf(Dnf1, Dnf2) end}).
 
 % intersection and union for ty, corecursive
 % Here, we have two operands for memoization. 
