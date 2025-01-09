@@ -1,0 +1,8 @@
+{application, musem,
+ [{description, "Minimal semantic subtyping library"},
+  {vsn, "1.0.0"},
+  {applications,
+   [kernel,
+    stdlib
+   ]}
+ ]}.
